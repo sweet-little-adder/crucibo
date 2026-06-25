@@ -1,0 +1,3 @@
+from morning_star.features.schema import FEATURE_DIM, FEATURE_NAMES, FEATURE_SCHEMA_VERSION
+
+__all__ = ["FEATURE_DIM", "FEATURE_NAMES", "FEATURE_SCHEMA_VERSION"]

@@ -1,0 +1,12 @@
+# Reference config — CLI flags override these defaults today.
+symbol: BTCUSDT
+interval: 5m
+lookback: 20
+forward_horizon: 5
+hidden_dim: 8
+epochs: 80
+learning_rate: 0.05
+threshold: 0.5
+target_shares: 1
+initial_cash: 1000000.0
+seed: 42
