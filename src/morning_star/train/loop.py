@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from morning_star.features.schema import FEATURE_DIM
-from morning_star.io_parquet import parquet_to_ticks, sorted_ticks
+from morning_star.io_parquet import filter_price_bars, parquet_to_ticks, sorted_ticks
 from morning_star.models.baseline import BaselineMLP
 from morning_star.train.dataset import build_supervised_rows, min_ticks_for_training
 
@@ -92,7 +92,7 @@ def train_from_parquet(
     initial_cash: float = 1_000_000.0,
 ) -> tuple[BaselineMLP, list]:
     path = ticks_path.resolve()
-    ticks = sorted_ticks(parquet_to_ticks(path))
+    ticks = sorted_ticks(filter_price_bars(parquet_to_ticks(path)))
     need = min_ticks_for_training(lookback=lookback, forward_horizon=forward_horizon)
     if len(ticks) < need:
         raise ValueError(

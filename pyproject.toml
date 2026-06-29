@@ -12,12 +12,16 @@ dependencies = [
     "numpy>=1.26",
     "polars>=1.0",
     "pydantic>=2,<3",
+    "pyyaml>=6",
 ]
 
 [project.scripts]
 morning-star = "morning_star.cli:main"
 
 [project.optional-dependencies]
+torch = [
+    "torch>=2.0",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.8",

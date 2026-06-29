@@ -29,3 +29,18 @@ def parquet_to_ticks(path: Path) -> list[Tick]:
 
 def sorted_ticks(ticks: list[Tick]) -> list[Tick]:
     return sorted(ticks, key=lambda t: (t.ts_event_ns, t.symbol))
+
+
+def filter_price_bars(ticks: list[Tick]) -> list[Tick]:
+    """Keep OHLCV klines; drop funding and mark-price rows from Binance silver."""
+    out: list[Tick] = []
+    for tick in ticks:
+        cond = tick.conditions or ""
+        if cond == "binance:funding-rate":
+            continue
+        if cond.startswith("binance:") and not cond.startswith("binance:futures-"):
+            continue
+        if tick.price <= 0:
+            continue
+        out.append(tick)
+    return out

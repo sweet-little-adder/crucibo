@@ -92,6 +92,7 @@ def save_artifact(
     ticks_path: Path,
     tick_count: int,
     symbol: str | None,
+    extra_manifest: dict[str, Any] | None = None,
 ) -> Path:
     artifact_dir = out_dir.resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -113,8 +114,11 @@ def save_artifact(
         training_tick_count=tick_count,
         training_symbol=symbol,
     )
+    payload = manifest.to_dict()
+    if extra_manifest:
+        payload.update(extra_manifest)
     manifest_path(artifact_dir).write_text(
-        json.dumps(manifest.to_dict(), indent=2) + "\n",
+        json.dumps(payload, indent=2) + "\n",
         encoding="utf-8",
     )
     np.savez(
