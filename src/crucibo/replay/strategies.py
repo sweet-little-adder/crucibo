@@ -8,6 +8,7 @@ from typing import Protocol
 from crucibo.features import FeatureState
 from crucibo.mlp import MLPModel, load_mlp
 from crucibo.models import TradeTick
+from crucibo.morning_star.strategy import MorningStarStrategy
 
 
 class TickStrategy(Protocol):
@@ -105,4 +106,11 @@ def resolve_strategy(
         if model_path is None:
             raise ValueError("neural strategy requires --model PATH to a trained .npz checkpoint")
         return NeuralStrategy.from_checkpoint(model_path)
-    raise ValueError(f"unknown strategy: {name!r} (try flat | buy_hold | neural)")
+    if key in {"morning_star", "morningstar", "external"}:
+        if model_path is None:
+            raise ValueError(
+                "morning_star strategy requires --model PATH to an artifact directory "
+                "(manifest.json + weights.npz)"
+            )
+        return MorningStarStrategy.from_artifact(model_path)
+    raise ValueError(f"unknown strategy: {name!r} (try flat | buy_hold | neural | morning_star)")

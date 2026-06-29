@@ -11,7 +11,8 @@ from pathlib import Path
 import httpx
 
 from crucibo.alphavantage.bars import ingest_alpha_vantage_daily, ingest_alpha_vantage_intraday
-from crucibo.io_parquet import parquet_to_ticks
+from crucibo.binance.klines import ingest_binance_futures
+from crucibo.io_parquet import filter_price_bars, parquet_to_ticks
 from crucibo.mlp import train_from_parquet
 from crucibo.news.feeds import list_feeds
 from crucibo.news.rss import ingest_all_feeds_day, ingest_rss_feed_day
@@ -64,6 +65,54 @@ def main() -> None:
     )
     p_avi.add_argument("--data-root", type=Path, default=None)
 
+    p_bin = subs.add_parser(
+        "ingest-binance",
+        help="Binance USD-M futures klines + mark price + funding (public API, no key)",
+    )
+    p_bin.add_argument("--symbol", required=True, help="Perpetual symbol, e.g. BTCUSDT")
+    p_bin.add_argument(
+        "--interval",
+        default="5m",
+        choices=[
+            "1m",
+            "3m",
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "2h",
+            "4h",
+            "6h",
+            "8h",
+            "12h",
+            "1d",
+            "3d",
+            "1w",
+            "1M",
+        ],
+    )
+    p_bin.add_argument(
+        "--start-date",
+        required=True,
+        help="UTC start calendar day YYYY-MM-DD (inclusive)",
+    )
+    p_bin.add_argument(
+        "--end-date",
+        default=None,
+        help="UTC end calendar day YYYY-MM-DD (inclusive); default = now",
+    )
+    p_bin.add_argument(
+        "--no-mark-price",
+        action="store_true",
+        help="Skip mark-price klines",
+    )
+    p_bin.add_argument(
+        "--no-funding",
+        action="store_true",
+        help="Skip funding-rate history",
+    )
+    p_bin.add_argument("--data-root", type=Path, default=None)
+
     p_poly = subs.add_parser(
         "polygon-trades",
         help="Polygon REST v3 trades ingest (paid entitlement required)",
@@ -77,13 +126,13 @@ def main() -> None:
         help="Replay from bars.parquet or trades.parquet on disk",
     )
     p_rp.add_argument("--ticks", type=Path, required=True)
-    p_rp.add_argument("--strategy", default="flat", help="flat | buy_hold | neural")
+    p_rp.add_argument("--strategy", default="flat", help="flat | buy_hold | neural | morning_star")
     p_rp.add_argument("--target-shares", type=int, default=100)
     p_rp.add_argument(
         "--model",
         type=Path,
         default=None,
-        help="Trained .npz checkpoint (required for --strategy neural)",
+        help="neural: .npz checkpoint; morning_star: artifact dir (manifest.json + weights.npz)",
     )
     p_rp.add_argument("--slip-bps", type=float, default=2.0)
     p_rp.add_argument("--fee-per-share", type=float, default=0.005)
@@ -106,6 +155,47 @@ def main() -> None:
     p_tp.add_argument("--threshold", type=float, default=0.5)
     p_tp.add_argument("--target-shares", type=int, default=50)
     p_tp.add_argument("--initial-cash", type=float, default=1_000_000.0)
+
+    p_paper = subs.add_parser(
+        "paper-binance",
+        help="Paper trade on live Binance USD-M kline closes (no real orders)",
+    )
+    p_paper.add_argument("--symbol", required=True, help="Perpetual symbol, e.g. BTCUSDT")
+    p_paper.add_argument(
+        "--interval",
+        default="5m",
+        choices=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"],
+    )
+    p_paper.add_argument(
+        "--strategy",
+        default="flat",
+        help="flat | buy_hold | morning_star",
+    )
+    p_paper.add_argument("--target-shares", type=int, default=1)
+    p_paper.add_argument(
+        "--model",
+        type=Path,
+        default=None,
+        help="morning_star artifact dir (manifest.json + weights.npz)",
+    )
+    p_paper.add_argument("--slip-bps", type=float, default=2.0)
+    p_paper.add_argument("--fee-per-share", type=float, default=0.0)
+    p_paper.add_argument("--initial-cash", type=float, default=1_000_000.0)
+    p_paper.add_argument(
+        "--max-loss-usd",
+        type=float,
+        default=None,
+        help="Kill switch: stop if drawdown from equity peak exceeds this USD amount",
+    )
+    p_paper.add_argument("--max-position-shares", type=int, default=None)
+    p_paper.add_argument(
+        "--max-ticks",
+        type=int,
+        default=None,
+        help="Stop after N closed klines (useful for smoke tests)",
+    )
+    p_paper.add_argument("--run-id", default=None)
+    p_paper.add_argument("--data-root", type=Path, default=None)
 
     p_rf = subs.add_parser("rss-feeds", help="List curated free RSS news feeds (no network)")
     p_rf.add_argument("--json", action="store_true", help="Emit machine-readable feed list")
@@ -206,6 +296,29 @@ def main() -> None:
         )
         return
 
+    if args.cmd == "ingest-binance":
+        try:
+            out = ingest_binance_futures(
+                symbol=args.symbol,
+                interval=args.interval,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                silver_root=args.data_root,
+                include_mark_price=not args.no_mark_price,
+                include_funding=not args.no_funding,
+            )
+        except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+        print(
+            out.row_count,
+            "events →",
+            out.parquet_path,
+            f"(klines={out.kline_count}, mark={out.mark_price_count}, funding={out.funding_count})",
+        )
+        print("manifest:", out.manifest_path)
+        return
+
     if args.cmd == "polygon-trades":
         try:
             out = ingest_polygon_trades_day(
@@ -249,6 +362,86 @@ def main() -> None:
         print("manifest:", out.manifest_path)
         return
 
+    if args.cmd == "paper-binance":
+        import asyncio
+
+        from crucibo.paper.engine import PaperConfig
+        from crucibo.paper.session import run_paper_session, write_paper_manifest
+
+        runs_parent = _runs_parent(args.data_root)
+        try:
+            strat = resolve_strategy(
+                args.strategy,
+                target_shares=args.target_shares,
+                model_path=args.model,
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        cfg = PaperConfig(
+            initial_cash=args.initial_cash,
+            slip_bps=args.slip_bps,
+            fee_per_share=args.fee_per_share,
+            max_loss_usd=args.max_loss_usd,
+            max_position_shares=args.max_position_shares,
+        )
+        sym = args.symbol.upper()
+        run_id = args.run_id or make_run_id(prefix="paper", symbol=sym, strategy=args.strategy)
+        out_dir = runs_parent / run_id
+        tick_count = 0
+
+        def _on_tick(_tick, state) -> None:
+            nonlocal tick_count
+            tick_count += 1
+            eq = state.cash + state.shares * _tick.price
+            print(
+                json.dumps(
+                    {
+                        "ts_event_ns": _tick.ts_event_ns,
+                        "price": _tick.price,
+                        "shares": state.shares,
+                        "cash": round(state.cash, 2),
+                        "equity": round(eq, 2),
+                        "killed": state.killed,
+                    }
+                )
+            )
+
+        try:
+            state = asyncio.run(
+                run_paper_session(
+                    strategy=strat,
+                    symbol=sym,
+                    interval=args.interval,
+                    cfg=cfg,
+                    max_ticks=args.max_ticks,
+                    on_tick=_on_tick,
+                )
+            )
+        except KeyboardInterrupt:
+            print("interrupted — paper session stopped", file=sys.stderr)
+            raise SystemExit(130) from None
+        except Exception as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        manifest_path = write_paper_manifest(
+            out_dir=out_dir,
+            symbol=sym,
+            interval=args.interval,
+            strategy_name=args.strategy,
+            model_path=str(args.model.resolve()) if args.model else None,
+            cfg=cfg,
+            state=state,
+            tick_count=tick_count,
+        )
+        print("paper run:", out_dir)
+        print("manifest:", manifest_path)
+        if state.killed:
+            print("killed:", state.kill_reason, file=sys.stderr)
+        return
+
     if args.cmd != "replay-parquet":
         parser.error(f"unknown {args.cmd!r}")
 
@@ -269,7 +462,7 @@ def main() -> None:
         print(exc, file=sys.stderr)
         raise SystemExit(2) from exc
 
-    ticks = parquet_to_ticks(args.ticks.resolve())
+    ticks = filter_price_bars(parquet_to_ticks(args.ticks.resolve()))
     sym = ticks[0].symbol if ticks else "EMPTY"
     run_id = args.run_id or make_run_id(prefix="pq", symbol=sym, strategy=args.strategy)
 

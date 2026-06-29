@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 
 def utc_now_ns() -> int:
@@ -30,12 +30,22 @@ class TradeTick(BaseModel):
         ge=0,
     )
     symbol: str = Field(..., min_length=1)
-    price: float = Field(..., gt=0)
+    price: float = Field(
+        ...,
+        description="Last trade/mid for bars; signed funding rate for funding events.",
+    )
     size: int = Field(..., ge=1)
     conditions: str | None = Field(
         default=None,
         description="Vendor-specific trade conditions / sale codes if available.",
     )
+
+    @field_validator("price")
+    @classmethod
+    def price_nonzero(cls, value: float) -> float:
+        if value == 0:
+            raise ValueError("price must be non-zero")
+        return value
 
     @computed_field  # type: ignore[prop-decorator]
     @property

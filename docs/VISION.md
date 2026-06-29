@@ -2,35 +2,34 @@
 
 ## Thesis
 
-Build **professional systematic habits**—the shape of infrastructure—on a pipeline that stays **truthful under scrutiny**, even when scope and capital assumptions are intentionally limited.
+**Crucibo + morning-star** is an execution and evaluation plane for systematic models: ingest real market data, train in a separate repo, replay and paper-trade with honest event-time clocks, explicit economics, and auditable manifests.
 
-**Crucibo** is a research sandbox: fewer symbols, shorter windows, simplified economics—but **non-negotiable correctness** around time, leakage, fills, fees, and auditability.
+**Crucibo** owns data, replay, paper/live runtime, fills, fees, and kill switches.  
+**morning-star** owns features, training, walk-forward, and checkpoint export.
+
+Non-negotiable: no lookahead, reproducible runs, kill switches before real capital.
 
 ## Outcomes
 
-Within 6–18 months of part-time development:
+1. **Ingest** — Normalized `TradeTick` archives (Alpha Vantage, Binance futures, optional Polygon/RSS).
+2. **Model harness** — morning-star exports versioned artifacts; crucibo loads them as `TickStrategy` without importing PyTorch.
+3. **Replay** — Deterministic backtest with PnL, fills, slippage, run manifests.
+4. **Walk-forward** — Train window vs OOS window in morning-star before trusting a checkpoint.
+5. **Paper trading** — Live Binance kline WebSocket feed, virtual fills, drawdown kill switch.
+6. **Risk scaffolding** — Max position, max loss USD, explicit kill reasons in manifests.
 
-1. **Ingest**: Normalized ticks or bars from a vendor into **partitioned**, **immutable** archives (dates + symbols).
-2. **Clock model**: Explicit policy for **event time**, **replay lag**, optional **latency shock** knobs—never “pretend we saw the future.”
-3. **Simulator**: Deterministic **backtest / replay** producing **PnL curves, fills, commissions, slip model**, parameterized by YAML/TOML.
-4. **Attribution**: Explain *why* a run won or lost (turnover, spread, regimes, outliers)—with measurable drivers, not narrative guesswork.
-5. **Risk scaffolding**: Caps, gross exposure placeholders, sanity checks—even if simplistic at first.
+## Near-term goals
 
-## Non-goals
+- Richer features in morning-star (funding, mark price, news embeddings).
+- Multi-stream replay (bars + news by event time).
+- Live broker bridge (separate design doc, explicit capital limits).
 
-- Competitive HFT latency.
-- Borrow, locate, full Reg NMS order-routing realism on day one.
-- Live trading without a separate, explicit “kill switch + capital limit” design (even paper).
+## Non-goals (for now)
 
-## Reproducibility
-
-- Each run writes a **manifest**: data slice reference, git commit, config, and environment metadata where available.
-- Simulation errors should surface explicitly rather than producing silently wrong PnL.
-
-## US equities scope (default)
-
-Single exchange tape or consolidated **vendor abstraction** behind one interface (`DATA.md`). Start **one mega-cap**, expand only when ingestion is autopilot.
+- Colocated HFT / microstructure queue simulation.
+- Full Reg NMS / borrow-locate realism.
+- Live trading without kill switch + max-notional caps.
 
 ## Success criterion
 
-If you cannot **reproduce** last month’s experiment on Tuesday, it did not happen.
+Train in morning-star → replay in crucibo → paper on live feed produces the same *decisions* on overlapping history, and every run is reproducible from manifest + data slice.

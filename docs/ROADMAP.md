@@ -1,51 +1,56 @@
 # Roadmap
 
-Phases are **capabilities**, not calendar promises. Revisit when ingest or replay assumptions change.
+Phases are **capabilities**, not calendar promises.
 
 ## Principles
 
-- **Real data first** — Alpha Vantage free tier for daily/intraday bars; Polygon optional for ticks.
+- **Real data first** — Binance futures (free), Alpha Vantage (free), Polygon optional.
 - **Event-time honesty** — no lookahead; manifests on every run.
-- **Kill bad ideas cheaply** — replay with fees before paper/live.
+- **morning-star trains, crucibo executes** — artifact contract between repos.
+- **Paper before live** — kill switch required on any real-time loop.
 
 ---
 
 ## Phase 1 — Ingest + schema (done)
 
-- [x] Typed `TradeTick` / `NewsEvent` schemas + Parquet I/O
-- [x] **Alpha Vantage** daily + intraday bar ingest
-- [x] Polygon trades ingest (paid entitlement)
-- [x] RSS news ingest (free)
+- [x] Typed `TradeTick` / `NewsEvent` + Parquet I/O
+- [x] Alpha Vantage daily + intraday
+- [x] **Binance USD-M futures** klines + mark price + funding
+- [x] Polygon trades (paid), RSS news (free)
 - [x] Silver layout + per-slice manifests
 
 ---
 
-## Phase 2 — Replay + naive strategy (done)
+## Phase 2 — Replay + strategies (done)
 
 - [x] `replay_ticks` sorted by `ts_event_ns`
-- [x] Strategies: `flat`, `buy_hold`, `neural` (MLP checkpoint)
+- [x] Strategies: `flat`, `buy_hold`, `neural`, **`morning_star`**
 - [x] Run bundles: fills, equity curve, manifest
-- [x] **CLI**: `replay-parquet`, `train-from-parquet`
+- [x] CLI: `replay-parquet`, `train-from-parquet`
 
 ---
 
 ## Phase 3 — Research discipline (in progress)
 
-- [ ] **Walk-forward CLI** — train date range vs OOS date range on same parquet
-- [ ] Costs model object vs loose floats
-- [ ] Session clock (RTH) for intraday bars
-- [ ] Attribution hooks in manifest
+- [x] **Walk-forward** in morning-star (`walk-forward` CLI)
+- [x] **PyTorch trainer** in morning-star (exports numpy weights for crucibo)
+- [ ] Costs model object vs loose floats in crucibo
+- [ ] Session clock (RTH) for US intraday bars
+- [ ] Attribution hooks in replay manifest
 
 ---
 
-## Phase 4 — Multi-stream (future)
+## Phase 4 — Multi-stream + paper (in progress)
 
+- [x] **Paper trading** — `paper-binance` on live kline WebSocket (virtual fills)
 - [ ] Merge `NewsEvent` + bars by event time in replay
-- [ ] News-aware features (time since last headline)
-- [ ] Paper-trading bridge (explicit kill switch)
+- [ ] News-aware features in morning-star
+- [ ] Record paper runs under `data/runs/` with equity snapshots
 
 ---
 
-## Phase 5 — Live (non-goals until Phase 3 boring)
+## Phase 5 — Live (future)
 
-- Live execution, borrow/locate, Reg NMS realism — separate explicit design.
+- Live broker integration (Binance API keys, order state machine)
+- Borrow/locate, Reg NMS — separate explicit design
+- Latency profiling before any “HFT” claims

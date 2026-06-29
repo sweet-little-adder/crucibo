@@ -39,6 +39,21 @@ def parquet_to_ticks(path: Path) -> list[TradeTick]:
     return ticks
 
 
+def filter_price_bars(ticks: list[TradeTick]) -> list[TradeTick]:
+    """Drop funding rows and non-positive prices before bar replay / training."""
+    out: list[TradeTick] = []
+    for tick in ticks:
+        cond = tick.conditions or ""
+        if cond == "binance:funding-rate":
+            continue
+        if cond.startswith("binance:") and not cond.startswith("binance:futures-"):
+            continue
+        if tick.price <= 0:
+            continue
+        out.append(tick)
+    return out
+
+
 def news_to_parquet(events: list[NewsEvent], path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     df = pl.DataFrame(news_events_to_polars_rows(events))
