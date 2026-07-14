@@ -1,0 +1,15 @@
+# Crucibo defaults — override via CLI flags or CRUCIBO_DATA_ROOT env.
+
+data_root: data
+
+logging:
+  level: INFO
+
+ingest:
+  default_vendor: alphavantage
+
+backtest:
+  initial_cash: 1000000.0
+  fee_bps: 4.0
+  slippage_bps: 2.0
+  latency_bars: 0

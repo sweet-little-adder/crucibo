@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>crucibo paper</title>
+  <style>
+    :root {
+      --bg: #000;
+      --fg: #fff;
+      --muted: #888;
+      --line: #333;
+      --down: #666;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    header {
+      border-bottom: 1px solid var(--line);
+      padding: 16px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-size: 13px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .status {
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .status.connecting { color: var(--muted); }
+    .status.waiting { color: var(--fg); }
+    .status.show { color: var(--fg); }
+    .status.tick { color: var(--fg); }
+    .status.killed, .status.disconnected { color: var(--down); }
+    .status.done { color: var(--muted); }
+    .banner {
+      border-bottom: 1px solid var(--line);
+      padding: 12px 20px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    main {
+      padding: 20px;
+      display: grid;
+      gap: 20px;
+      max-width: 1100px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
+    }
+    .cell {
+      background: var(--bg);
+      padding: 12px 14px;
+    }
+    .label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 4px;
+    }
+    .value {
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .value.small { font-size: 13px; font-weight: 400; }
+    .pnl-pos { color: var(--fg); }
+    .pnl-neg { color: var(--down); }
+    section h2 {
+      margin: 0 0 10px;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    canvas {
+      width: 100%;
+      height: 160px;
+      border: 1px solid var(--line);
+      display: block;
+      background: var(--bg);
+    }
+    #activity {
+      border: 1px solid var(--line);
+      max-height: 220px;
+      overflow-y: auto;
+      font-size: 12px;
+    }
+    #activity .row {
+      border-bottom: 1px solid var(--line);
+      padding: 8px 10px;
+      color: var(--muted);
+    }
+    #activity .row:last-child { border-bottom: none; }
+    #activity .row strong { color: var(--fg); font-weight: 600; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 8px 10px;
+      text-align: left;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 10px;
+    }
+    .empty {
+      color: var(--muted);
+      padding: 12px 0;
+    }
+    footer {
+      border-top: 1px solid var(--line);
+      padding: 12px 20px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>crucibo paper</h1>
+    <div id="status" class="status connecting">connecting</div>
+  </header>
+  <div class="banner" id="banner">
+    One long-running <strong>crucibo</strong> process polls market data, loads the
+    <strong>aapl_mlp_v1</strong> model weights, and simulates fills. No shell commands per bar.
+    No Cursor agent loop required.
+  </div>
+  <div class="banner" id="guide">
+    <strong>Reading this page</strong> — top-right status tells you the mode.
+    <strong>Decision bars</strong> counts how many market bars the model has judged (not live ticks).
+    <strong>PnL</strong> is simulated profit vs $1M start (cash + stock value − $1,000,000).
+    A red PnL with no fill usually means <em>holding shares while price moved</em>, not a sale loss.
+    <strong>Fills</strong> are simulated buys/sells only. <strong>Activity</strong> is the event log.
+  </div>
+  <main>
+    <section>
+      <h2>now showing</h2>
+      <div class="grid" style="margin-bottom:0">
+        <div class="cell"><div class="label">bar date</div><div class="value small" id="bar-date">—</div></div>
+        <div class="cell"><div class="label">model says</div><div class="value small" id="model-action">—</div></div>
+        <div class="cell"><div class="label">mode</div><div class="value small" id="mode">—</div></div>
+      </div>
+    </section>
+    <div class="grid" id="metrics">
+      <div class="cell"><div class="label">feed</div><div class="value small" id="feed">—</div></div>
+      <div class="cell"><div class="label">symbol</div><div class="value" id="symbol">—</div></div>
+      <div class="cell"><div class="label">interval</div><div class="value" id="interval">—</div></div>
+      <div class="cell"><div class="label">strategy</div><div class="value small" id="strategy">—</div></div>
+      <div class="cell"><div class="label">last market price</div><div class="value" id="price">—</div></div>
+      <div class="cell"><div class="label">position</div><div class="value" id="shares">0</div></div>
+      <div class="cell"><div class="label">cash</div><div class="value" id="cash">—</div></div>
+      <div class="cell"><div class="label">equity</div><div class="value" id="equity">—</div></div>
+      <div class="cell"><div class="label">pnl</div><div class="value" id="pnl">—</div></div>
+      <div class="cell"><div class="label">drawdown</div><div class="value" id="drawdown">0.00</div></div>
+      <div class="cell"><div class="label">decision bars</div><div class="value" id="ticks">0</div></div>
+      <div class="cell"><div class="label">polls</div><div class="value" id="polls">0</div></div>
+      <div class="cell"><div class="label">loop</div><div class="value" id="loop">0</div></div>
+    </div>
+
+    <section>
+      <h2>activity</h2>
+      <div id="activity"></div>
+    </section>
+
+    <section>
+      <h2>equity curve</h2>
+      <canvas id="chart" width="1000" height="160"></canvas>
+      <div class="empty" id="chart-empty">no decision bars yet — chart appears after the first new bar</div>
+    </section>
+
+    <section>
+      <h2>fills</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>time</th>
+            <th>side</th>
+            <th>qty</th>
+            <th>price</th>
+            <th>fee</th>
+            <th>cash after</th>
+          </tr>
+        </thead>
+        <tbody id="fills"></tbody>
+      </table>
+      <div class="empty" id="fills-empty">no simulated fills yet</div>
+    </section>
+  </main>
+  <footer id="footer">connecting to server…</footer>
+
+  <script>
+    const fmt = (n, d = 2) => Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+    const statusEl = document.getElementById("status");
+    const footerEl = document.getElementById("footer");
+    const activityEl = document.getElementById("activity");
+    const fillsBody = document.getElementById("fills");
+    const fillsEmpty = document.getElementById("fills-empty");
+    const chartEmpty = document.getElementById("chart-empty");
+    const chart = document.getElementById("chart");
+    const ctx = chart.getContext("2d");
+    const equitySeries = [];
+    let pollCount = 0;
+    let showMode = false;
+
+    function setStatus(text, cls) {
+      statusEl.textContent = text;
+      statusEl.className = "status " + cls;
+    }
+
+    function setPnl(el, value) {
+      el.textContent = (value >= 0 ? "+" : "") + fmt(value);
+      el.className = "value " + (value >= 0 ? "pnl-pos" : "pnl-neg");
+    }
+
+    function logActivity(text) {
+      const row = document.createElement("div");
+      row.className = "row";
+      const now = new Date().toISOString().replace("T", " ").replace(".000Z", " UTC");
+      row.innerHTML = `<strong>${now}</strong> — ${text}`;
+      activityEl.prepend(row);
+      while (activityEl.children.length > 80) activityEl.removeChild(activityEl.lastChild);
+    }
+
+    function drawChart() {
+      const w = chart.width;
+      const h = chart.height;
+      ctx.clearRect(0, 0, w, h);
+      chartEmpty.style.display = equitySeries.length < 2 ? "block" : "none";
+      if (equitySeries.length < 2) return;
+
+      const vals = equitySeries.map((p) => p.equity);
+      const min = Math.min(...vals);
+      const max = Math.max(...vals);
+      const span = max - min || 1;
+      const pad = 12;
+
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      equitySeries.forEach((p, i) => {
+        const x = pad + (i / (equitySeries.length - 1)) * (w - pad * 2);
+        const y = h - pad - ((p.equity - min) / span) * (h - pad * 2);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    function addFill(fill) {
+      fillsEmpty.style.display = "none";
+      const tr = document.createElement("tr");
+      const ts = new Date(fill.ts_event_ns / 1e6).toISOString().replace("T", " ").replace(".000Z", " UTC");
+      tr.innerHTML = `
+        <td>${ts}</td>
+        <td>${fill.side}</td>
+        <td>${fill.qty_shares}</td>
+        <td>${fmt(fill.exec_price)}</td>
+        <td>${fmt(fill.fee_cash, 4)}</td>
+        <td>${fmt(fill.cash_after)}</td>
+      `;
+      fillsBody.prepend(tr);
+    }
+
+    function applyPortfolio(msg) {
+      if (msg.feed) document.getElementById("feed").textContent = msg.feed;
+      if (msg.symbol) document.getElementById("symbol").textContent = msg.symbol;
+      if (msg.interval) document.getElementById("interval").textContent = msg.interval;
+      if (msg.strategy) document.getElementById("strategy").textContent = msg.strategy;
+      if (msg.price != null) document.getElementById("price").textContent = fmt(msg.price);
+      if (msg.shares != null) document.getElementById("shares").textContent = String(msg.shares);
+      if (msg.cash != null) document.getElementById("cash").textContent = fmt(msg.cash);
+      if (msg.equity != null) document.getElementById("equity").textContent = fmt(msg.equity);
+      if (msg.pnl != null) setPnl(document.getElementById("pnl"), msg.pnl);
+      if (msg.drawdown != null) document.getElementById("drawdown").textContent = fmt(msg.drawdown);
+      if (msg.tick_index != null || msg.ticks != null) {
+        document.getElementById("ticks").textContent = String(msg.tick_index ?? msg.ticks);
+      }
+      if (msg.loop != null) document.getElementById("loop").textContent = String(msg.loop);
+    }
+
+    function describeAction(msg) {
+      if (msg.fill) return msg.fill.side + " " + msg.fill.qty_shares + " shares";
+      if (msg.shares > 0) return "HOLD " + msg.shares + " shares (no trade)";
+      return "STAY FLAT (no trade)";
+    }
+
+    function onTick(msg) {
+      applyPortfolio(msg);
+      document.getElementById("bar-date").textContent = msg.ts_label || "—";
+      document.getElementById("model-action").textContent = describeAction(msg);
+      footerEl.textContent = "decision on " + msg.ts_label + (msg.kill_reason ? " — " + msg.kill_reason : "");
+      const pnlNote = msg.fill ? "after trade" : (msg.shares > 0 ? "mark-to-market while holding" : "flat");
+      logActivity(`bar ${msg.tick_index}: ${pnlNote} — price ${fmt(msg.price)}, pnl ${fmt(msg.pnl)}, ${describeAction(msg)}`);
+
+      equitySeries.push({ equity: msg.equity, ts: msg.ts_event_ns });
+      if (equitySeries.length > 500) equitySeries.shift();
+      drawChart();
+
+      if (msg.fill) {
+        addFill(msg.fill);
+        logActivity(`simulated ${msg.fill.side} ${msg.fill.qty_shares} @ ${fmt(msg.fill.exec_price)}`);
+      }
+
+      if (msg.killed) setStatus("killed", "killed");
+      else setStatus("tick processed", "tick");
+    }
+
+    function onPoll(msg) {
+      pollCount = msg.poll_index || pollCount + 1;
+      document.getElementById("polls").textContent = String(pollCount);
+      if (msg.latest_price != null) document.getElementById("price").textContent = fmt(msg.latest_price);
+      const note = msg.message || "poll complete";
+      logActivity(note + (msg.latest_bar_label ? ` (latest bar ${msg.latest_bar_label})` : ""));
+      footerEl.textContent = note;
+      if (msg.phase === "seed" || msg.new_bars === 0) setStatus("waiting for new bar", "waiting");
+    }
+
+    const source = new EventSource("/events");
+    source.onopen = () => {
+      setStatus("connected", "waiting");
+      logActivity("browser connected to crucibo SSE stream");
+    };
+    source.onerror = () => setStatus("disconnected", "disconnected");
+    source.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "session") {
+        showMode = msg.mode === "show";
+        applyPortfolio(msg);
+        footerEl.textContent = msg.message || "session started";
+        document.getElementById("mode").textContent = showMode ? "show replay (loop)" : "live paper";
+        if (showMode) {
+          document.getElementById("banner").textContent =
+            "Show replay — recorded history looping. Numbers are simulated, not your real brokerage account.";
+          logActivity("show replay started for " + (msg.show_day || msg.symbol));
+          setStatus("show loop " + (msg.loop || 1), "show");
+        } else {
+          logActivity("session started for " + msg.symbol + " / " + msg.interval + " / " + msg.strategy);
+          if (msg.poll_seconds) logActivity("polling every " + msg.poll_seconds + "s");
+          setStatus("waiting for new bar", "waiting");
+        }
+        if (msg.model_path) logActivity("model: " + msg.model_path);
+      } else if (msg.type === "poll") {
+        onPoll(msg);
+      } else if (msg.type === "tick") {
+        onTick(msg);
+        if (showMode) setStatus("show loop " + (msg.loop || 1), "show");
+      } else if (msg.type === "loop_done") {
+        logActivity(msg.message || ("loop " + msg.loop + " done"));
+        footerEl.textContent = msg.message || footerEl.textContent;
+        if (showMode) setStatus("show loop " + ((msg.loop || 0) + 1), "show");
+      } else if (msg.type === "done") {
+        setStatus("done", "done");
+        footerEl.textContent = "session ended after " + msg.tick_count + " decision bars";
+        logActivity(footerEl.textContent);
+      }
+    };
+  </script>
+</body>
+</html>

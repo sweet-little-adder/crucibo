@@ -1,0 +1,1114 @@
+"""Command-line entry (batch workflows)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+import httpx
+
+from crucibo.alphavantage.bars import ingest_alpha_vantage_daily, ingest_alpha_vantage_intraday
+from crucibo.binance.klines import ingest_binance_futures
+from crucibo.io_parquet import filter_price_bars, parquet_to_ticks
+from crucibo.mlp import train_from_parquet
+from crucibo.news.feeds import list_feeds
+from crucibo.news.rss import ingest_all_feeds_day, ingest_rss_feed_day
+from crucibo.polygon.trades import ingest_polygon_trades_day
+from crucibo.replay.bundle import default_runs_parent, make_run_id, write_run_bundle
+from crucibo.replay.engine import ReplayConfig, replay_ticks, summarize_pnl
+from crucibo.replay.strategies import resolve_strategy
+
+
+def _git_sha_optional() -> str | None:
+    return os.environ.get("CRUCIBO_GIT_SHA", "").strip() or None
+
+
+def _runs_parent(cli_root: Path | None) -> Path:
+    return Path(cli_root).resolve() if cli_root else default_runs_parent()
+
+
+def _paper_interval(feed: str, interval: str | None) -> str:
+    if interval is not None:
+        return interval
+    return "5min" if feed == "alphavantage" else "5m"
+
+
+def _add_paper_risk_args(p: argparse.ArgumentParser, *, default_fee: float) -> None:
+    p.add_argument("--slip-bps", type=float, default=2.0)
+    p.add_argument("--fee-per-share", type=float, default=default_fee)
+    p.add_argument("--initial-cash", type=float, default=1_000_000.0)
+    p.add_argument(
+        "--max-loss-usd",
+        type=float,
+        default=None,
+        help="Kill switch: stop if drawdown from equity peak exceeds this USD amount",
+    )
+    p.add_argument(
+        "--max-position-shares",
+        type=int,
+        default=None,
+        help="Hard cap on long shares",
+    )
+    p.add_argument(
+        "--max-notional-usd",
+        type=float,
+        default=None,
+        help="Hard cap on position notional (shares * mark)",
+    )
+    p.add_argument(
+        "--flatten-on-kill",
+        action="store_true",
+        help="Virtually flatten position when kill switch trips",
+    )
+    p.add_argument(
+        "--allow-no-kill",
+        action="store_true",
+        help="Allow running without --max-loss-usd / --max-notional-usd (unsafe)",
+    )
+    p.add_argument(
+        "--mode",
+        choices=["paper", "live_dry_run"],
+        default="paper",
+        help="paper: virtual fills; live_dry_run: same fills via order-intent broker path",
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="crucibo",
+        description=(
+            "US equities trading infrastructure (stocks-first): ingest, replay, "
+            "paper, and live. Crypto/Binance is optional. See docs/HANDOFF.md."
+        ),
+    )
+    subs = parser.add_subparsers(dest="cmd", required=True)
+
+    p_avd = subs.add_parser(
+        "alphavantage-daily",
+        help="Alpha Vantage daily bars (~100 days, 1 free API call)",
+    )
+    p_avd.add_argument("--symbol", required=True)
+    p_avd.add_argument("--data-root", type=Path, default=None)
+
+    p_avi = subs.add_parser(
+        "alphavantage-intraday",
+        help="Alpha Vantage intraday bars (~100 bars, 1 free API call — 15-min delayed)",
+    )
+    p_avi.add_argument("--symbol", required=True)
+    p_avi.add_argument(
+        "--interval",
+        default="5min",
+        choices=["1min", "5min", "15min", "30min", "60min"],
+    )
+    p_avi.add_argument(
+        "--date",
+        dest="day",
+        default=None,
+        help="Optional filter YYYY-MM-DD (must fall inside compact window)",
+    )
+    p_avi.add_argument("--data-root", type=Path, default=None)
+
+    p_bin = subs.add_parser(
+        "ingest-binance",
+        help="Binance USD-M futures klines + mark price + funding (public API, no key)",
+    )
+    p_bin.add_argument("--symbol", required=True, help="Perpetual symbol, e.g. BTCUSDT")
+    p_bin.add_argument(
+        "--interval",
+        default="5m",
+        choices=[
+            "1m",
+            "3m",
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "2h",
+            "4h",
+            "6h",
+            "8h",
+            "12h",
+            "1d",
+            "3d",
+            "1w",
+            "1M",
+        ],
+    )
+    p_bin.add_argument(
+        "--start-date",
+        required=True,
+        help="UTC start calendar day YYYY-MM-DD (inclusive)",
+    )
+    p_bin.add_argument(
+        "--end-date",
+        default=None,
+        help="UTC end calendar day YYYY-MM-DD (inclusive); default = now",
+    )
+    p_bin.add_argument(
+        "--no-mark-price",
+        action="store_true",
+        help="Skip mark-price klines",
+    )
+    p_bin.add_argument(
+        "--no-funding",
+        action="store_true",
+        help="Skip funding-rate history",
+    )
+    p_bin.add_argument("--data-root", type=Path, default=None)
+
+    p_poly = subs.add_parser(
+        "polygon-trades",
+        help="Polygon REST v3 trades ingest (paid entitlement required)",
+    )
+    p_poly.add_argument("--symbol", required=True)
+    p_poly.add_argument("--date", dest="day", required=True)
+    p_poly.add_argument("--data-root", type=Path, default=None)
+
+    p_rp = subs.add_parser(
+        "replay-parquet",
+        help="Replay from bars.parquet or trades.parquet on disk",
+    )
+    p_rp.add_argument("--ticks", type=Path, required=True)
+    p_rp.add_argument("--strategy", default="flat", help="flat | buy_hold | neural | aapl_mlp_v1")
+    p_rp.add_argument("--target-shares", type=int, default=100)
+    p_rp.add_argument(
+        "--model",
+        type=Path,
+        default=None,
+        help="neural: .npz checkpoint; aapl_mlp_v1: artifact dir (manifest.json + weights.npz)",
+    )
+    p_rp.add_argument("--slip-bps", type=float, default=2.0)
+    p_rp.add_argument("--fee-per-share", type=float, default=0.005)
+    p_rp.add_argument("--initial-cash", type=float, default=1_000_000.0)
+    p_rp.add_argument("--run-id", default=None)
+    p_rp.add_argument("--data-root", type=Path, default=None)
+
+    p_tp = subs.add_parser(
+        "train-from-parquet",
+        help="Train MLP checkpoint from bars.parquet or trades.parquet",
+    )
+    p_tp.add_argument("--ticks", type=Path, required=True, help="Input parquet")
+    p_tp.add_argument("--out", type=Path, required=True, help="Output .npz path")
+    p_tp.add_argument("--seed", type=int, default=42)
+    p_tp.add_argument("--lookback", type=int, default=20)
+    p_tp.add_argument("--forward-horizon", type=int, default=5)
+    p_tp.add_argument("--hidden-dim", type=int, default=8)
+    p_tp.add_argument("--epochs", type=int, default=80)
+    p_tp.add_argument("--learning-rate", type=float, default=0.05)
+    p_tp.add_argument("--threshold", type=float, default=0.5)
+    p_tp.add_argument("--target-shares", type=int, default=50)
+    p_tp.add_argument("--initial-cash", type=float, default=1_000_000.0)
+
+    p_paper = subs.add_parser(
+        "paper-binance",
+        help="Paper trade on live Binance USD-M kline closes (no real orders)",
+    )
+    p_paper.add_argument("--symbol", required=True, help="Perpetual symbol, e.g. BTCUSDT")
+    p_paper.add_argument(
+        "--interval",
+        default="5m",
+        choices=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"],
+    )
+    p_paper.add_argument(
+        "--strategy",
+        default="flat",
+        help="flat | buy_hold | aapl_mlp_v1",
+    )
+    p_paper.add_argument("--target-shares", type=int, default=1)
+    p_paper.add_argument(
+        "--model",
+        type=Path,
+        default=None,
+        help="aapl_mlp_v1 artifact dir (manifest.json + weights.npz)",
+    )
+    _add_paper_risk_args(p_paper, default_fee=0.0)
+    p_paper.add_argument(
+        "--max-ticks",
+        type=int,
+        default=None,
+        help="Stop after N closed klines (useful for smoke tests)",
+    )
+    p_paper.add_argument("--run-id", default=None)
+    p_paper.add_argument("--data-root", type=Path, default=None)
+
+    p_av_paper = subs.add_parser(
+        "paper-alphavantage",
+        help="Paper trade US equities on Alpha Vantage bars (poll, no real orders)",
+    )
+    p_av_paper.add_argument("--symbol", required=True, help="US ticker, e.g. AAPL")
+    p_av_paper.add_argument(
+        "--interval",
+        default="5min",
+        help="daily | 1min | 5min | 15min | 30min | 60min (free tier ~15-min delayed)",
+    )
+    p_av_paper.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=300.0,
+        help="How often to poll Alpha Vantage (free tier: 25 req/day)",
+    )
+    p_av_paper.add_argument(
+        "--strategy",
+        default="flat",
+        help="flat | buy_hold | aapl_mlp_v1",
+    )
+    p_av_paper.add_argument("--target-shares", type=int, default=100)
+    p_av_paper.add_argument(
+        "--model",
+        type=Path,
+        default=None,
+        help="aapl_mlp_v1 artifact dir (manifest.json + weights.npz)",
+    )
+    _add_paper_risk_args(p_av_paper, default_fee=0.005)
+    p_av_paper.add_argument("--max-ticks", type=int, default=None)
+    p_av_paper.add_argument("--run-id", default=None)
+    p_av_paper.add_argument("--data-root", type=Path, default=None)
+
+    p_dash = subs.add_parser(
+        "paper-dashboard",
+        help="Paper trade with a live black-and-white web dashboard (SSE)",
+    )
+    p_dash.add_argument(
+        "--feed",
+        default="alphavantage",
+        choices=["alphavantage", "binance"],
+        help="alphavantage: US stocks (default); binance: crypto futures",
+    )
+    p_dash.add_argument("--symbol", required=True, help="US ticker (AAPL) or crypto (BTCUSDT)")
+    p_dash.add_argument(
+        "--interval",
+        default=None,
+        help="AV: daily|1min|5min|15min|30min|60min; Binance: 1m|5m|15m|... (default per feed)",
+    )
+    p_dash.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=300.0,
+        help="Alpha Vantage poll interval (ignored for binance feed)",
+    )
+    p_dash.add_argument(
+        "--strategy",
+        default="flat",
+        help="flat | buy_hold | aapl_mlp_v1",
+    )
+    p_dash.add_argument("--target-shares", type=int, default=100)
+    p_dash.add_argument(
+        "--model",
+        type=Path,
+        default=None,
+        help="aapl_mlp_v1 artifact dir (manifest.json + weights.npz)",
+    )
+    _add_paper_risk_args(p_dash, default_fee=0.005)
+    p_dash.add_argument("--max-ticks", type=int, default=None)
+    p_dash.add_argument("--host", default="127.0.0.1")
+    p_dash.add_argument("--port", type=int, default=8765)
+    p_dash.add_argument("--run-id", default=None)
+    p_dash.add_argument("--data-root", type=Path, default=None)
+
+    p_live = subs.add_parser(
+        "live-equities",
+        help=(
+            "US equities live path (primary): Alpha Vantage feed + dry-run or "
+            "Alpaca paper broker, order SM, risk, recon, latency budgets"
+        ),
+    )
+    p_live.add_argument("--symbol", required=True, help="US ticker, e.g. AAPL")
+    p_live.add_argument(
+        "--interval",
+        default="5min",
+        help="daily | 1min | 5min | 15min | 30min | 60min",
+    )
+    p_live.add_argument(
+        "--broker",
+        default="dry_run",
+        choices=["dry_run", "alpaca_paper"],
+        help="dry_run: local virtual broker (default); alpaca_paper: signed Alpaca paper REST",
+    )
+    p_live.add_argument(
+        "--strategy",
+        default="flat",
+        help="flat | buy_hold | aapl_mlp_v1",
+    )
+    p_live.add_argument("--target-shares", type=int, default=100)
+    p_live.add_argument("--model", type=Path, default=None)
+    p_live.add_argument("--slip-bps", type=float, default=2.0)
+    p_live.add_argument("--fee-per-share", type=float, default=0.005)
+    p_live.add_argument("--initial-cash", type=float, default=1_000_000.0)
+    p_live.add_argument("--max-loss-usd", type=float, default=None)
+    p_live.add_argument("--max-position-shares", type=int, default=None)
+    p_live.add_argument("--max-notional-usd", type=float, default=None)
+    p_live.add_argument("--flatten-on-kill", action="store_true")
+    p_live.add_argument(
+        "--allow-no-kill",
+        action="store_true",
+        help="Allow running without max-loss/notional (unsafe)",
+    )
+    p_live.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=300.0,
+        help="Alpha Vantage poll interval (free tier: 25 req/day)",
+    )
+    p_live.add_argument("--max-ticks", type=int, default=None)
+    p_live.add_argument(
+        "--rth-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Only trade in US RTH 09:30–16:00 ET (default: on for intraday, off for daily)",
+    )
+    p_live.add_argument(
+        "--reconcile-every",
+        type=int,
+        default=1,
+        help="Reconcile local book vs broker every N ticks (0=never)",
+    )
+    p_live.add_argument(
+        "--enforce-latency-budgets",
+        action="store_true",
+        help="Kill session if decision/tick-to-order hard latency budgets trip",
+    )
+    p_live.add_argument(
+        "--i-accept-real-capital",
+        action="store_true",
+        help="Required to use live money endpoints (not enabled for alpaca_paper)",
+    )
+    p_live.add_argument("--run-id", default=None)
+    p_live.add_argument("--data-root", type=Path, default=None)
+
+    p_record = subs.add_parser(
+        "record-show",
+        help="Record a replay session to a show JSON file for paper-show",
+    )
+    p_record.add_argument("--ticks", type=Path, required=True)
+    p_record.add_argument("--strategy", default="flat", help="flat | buy_hold | aapl_mlp_v1")
+    p_record.add_argument("--target-shares", type=int, default=100)
+    p_record.add_argument("--model", type=Path, default=None)
+    p_record.add_argument(
+        "--day",
+        default=None,
+        help="Filter to one NY calendar day YYYY-MM-DD (recommended for intraday shows)",
+    )
+    p_record.add_argument("--interval", default="daily", help="Label stored in the show file")
+    p_record.add_argument("--out", type=Path, default=None, help="Output show JSON path")
+    p_record.add_argument("--slip-bps", type=float, default=2.0)
+    p_record.add_argument("--fee-per-share", type=float, default=0.005)
+    p_record.add_argument("--initial-cash", type=float, default=1_000_000.0)
+    p_record.add_argument("--data-root", type=Path, default=None)
+
+    p_show = subs.add_parser(
+        "paper-show",
+        help="Loop a recorded show on the dashboard (no live API calls)",
+    )
+    p_show.add_argument("--recording", type=Path, required=True, help="Show JSON from record-show")
+    p_show.add_argument("--host", default="127.0.0.1")
+    p_show.add_argument("--port", type=int, default=8765)
+    p_show.add_argument(
+        "--tick-delay",
+        type=float,
+        default=1.0,
+        help="Seconds between recorded bars during playback",
+    )
+    p_show.add_argument(
+        "--loop-pause",
+        type=float,
+        default=3.0,
+        help="Seconds between loop restarts",
+    )
+    p_show.add_argument(
+        "--once",
+        action="store_true",
+        help="Play the recording once and exit (default: loop forever)",
+    )
+
+    p_rf = subs.add_parser("rss-feeds", help="List curated free RSS news feeds (no network)")
+    p_rf.add_argument("--json", action="store_true", help="Emit machine-readable feed list")
+
+    p_ri = subs.add_parser(
+        "rss-ingest",
+        help="Ingest RSS/Atom headlines for one UTC day (free — respect feed ToS)",
+    )
+    p_ri.add_argument("--date", dest="day", required=True, help="UTC calendar day YYYY-MM-DD")
+    p_ri.add_argument("--source", default=None, help="Feed id from rss-feeds")
+    p_ri.add_argument("--all", action="store_true", help="Ingest every curated feed for --date")
+    p_ri.add_argument("--feed-url", default=None, help="Custom feed URL")
+    p_ri.add_argument("--data-root", type=Path, default=None)
+
+    args = parser.parse_args()
+
+    if args.cmd == "rss-feeds":
+        feeds = list_feeds()
+        if args.json:
+            print(
+                json.dumps(
+                    [
+                        {
+                            "source_id": feed.source_id,
+                            "name": feed.name,
+                            "url": feed.url,
+                            "description": feed.description,
+                        }
+                        for feed in feeds
+                    ],
+                    indent=2,
+                )
+            )
+        else:
+            for feed in feeds:
+                print(f"{feed.source_id:16}  {feed.name}")
+                print(f"{'':16}  {feed.url}")
+        return
+
+    if args.cmd == "rss-ingest":
+        if args.all and (args.source or args.feed_url):
+            print("use either --all or --source/--feed-url, not both", file=sys.stderr)
+            raise SystemExit(2)
+        if not args.all and not args.source and not args.feed_url:
+            print("provide --source, --feed-url, or --all", file=sys.stderr)
+            raise SystemExit(2)
+        try:
+            if args.all:
+                outcomes = ingest_all_feeds_day(day=args.day, silver_root=args.data_root)
+                total = sum(outcome.row_count for outcome in outcomes)
+                print(total, "articles across", len(outcomes), "feeds for", args.day)
+                for outcome in outcomes:
+                    print(outcome.row_count, "→", outcome.parquet_path)
+                return
+            outcome = ingest_rss_feed_day(
+                day=args.day,
+                source_id=args.source,
+                feed_url=args.feed_url,
+                silver_root=args.data_root,
+            )
+        except (ValueError, httpx.HTTPError) as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+        print(outcome.row_count, "articles →", outcome.parquet_path)
+        print("manifest:", outcome.manifest_path)
+        return
+
+    if args.cmd == "train-from-parquet":
+        try:
+            model = train_from_parquet(
+                ticks_path=args.ticks,
+                out=args.out,
+                seed=args.seed,
+                lookback=args.lookback,
+                forward_horizon=args.forward_horizon,
+                hidden_dim=args.hidden_dim,
+                epochs=args.epochs,
+                learning_rate=args.learning_rate,
+                threshold=args.threshold,
+                target_shares=args.target_shares,
+                initial_cash=args.initial_cash,
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+        print("model:", args.out.resolve())
+        print("ticks:", args.ticks.resolve())
+        print(
+            json.dumps(
+                {
+                    "lookback": model.lookback,
+                    "forward_horizon": model.forward_horizon,
+                    "threshold": model.threshold,
+                    "target_shares": model.target_shares,
+                    "hidden_dim": model.hidden_dim,
+                }
+            )
+        )
+        return
+
+    if args.cmd == "ingest-binance":
+        try:
+            out = ingest_binance_futures(
+                symbol=args.symbol,
+                interval=args.interval,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                silver_root=args.data_root,
+                include_mark_price=not args.no_mark_price,
+                include_funding=not args.no_funding,
+            )
+        except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+        print(
+            out.row_count,
+            "events →",
+            out.parquet_path,
+            f"(klines={out.kline_count}, mark={out.mark_price_count}, funding={out.funding_count})",
+        )
+        print("manifest:", out.manifest_path)
+        return
+
+    if args.cmd == "polygon-trades":
+        try:
+            out = ingest_polygon_trades_day(
+                symbol=args.symbol,
+                day=args.day,
+                silver_root=args.data_root,
+            )
+        except RuntimeError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+        print(out.row_count, "ticks →", out.parquet_path)
+        print("manifest:", out.manifest_path)
+        return
+
+    if args.cmd == "alphavantage-daily":
+        try:
+            out = ingest_alpha_vantage_daily(symbol=args.symbol, silver_root=args.data_root)
+        except (RuntimeError, httpx.HTTPError) as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+        print(out.row_count, "daily bars →", out.parquet_path)
+        print("manifest:", out.manifest_path)
+        print(
+            "tip: split train/OOS by date, then replay-parquet / train-from-parquet",
+            file=sys.stderr,
+        )
+        return
+
+    if args.cmd == "alphavantage-intraday":
+        try:
+            out = ingest_alpha_vantage_intraday(
+                symbol=args.symbol,
+                interval=args.interval,
+                day=args.day,
+                silver_root=args.data_root,
+            )
+        except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+        print(out.row_count, "intraday bars →", out.parquet_path)
+        print("manifest:", out.manifest_path)
+        return
+
+    if args.cmd == "record-show":
+        from crucibo.paper.engine import PaperConfig
+        from crucibo.paper.recording import (
+            default_show_path,
+            filter_ticks_by_day,
+            record_strategy_session,
+            save_show,
+        )
+
+        try:
+            strat = resolve_strategy(
+                args.strategy,
+                target_shares=args.target_shares,
+                model_path=args.model,
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        ticks = filter_price_bars(parquet_to_ticks(args.ticks.resolve()))
+        if args.day:
+            ticks = filter_ticks_by_day(ticks, args.day)
+            if not ticks:
+                print(f"no bars for day {args.day} in {args.ticks}", file=sys.stderr)
+                raise SystemExit(2)
+        if not ticks:
+            print("no ticks to record", file=sys.stderr)
+            raise SystemExit(2)
+
+        from crucibo.paper.recording import tick_ny_date
+
+        sym = ticks[0].symbol
+        if args.day:
+            show_day = args.day
+        else:
+            first = tick_ny_date(ticks[0])
+            last = tick_ny_date(ticks[-1])
+            show_day = first if first == last else f"{first}_to_{last}"
+
+        cfg = PaperConfig(
+            initial_cash=args.initial_cash,
+            slip_bps=args.slip_bps,
+            fee_per_share=args.fee_per_share,
+        )
+        recording = record_strategy_session(
+            strategy=strat,
+            ticks=ticks,
+            cfg=cfg,
+            feed="replay",
+            interval=args.interval,
+            strategy_name=args.strategy,
+            model_path=str(args.model.resolve()) if args.model else None,
+            show_day=show_day,
+            source_ticks_path=str(args.ticks.resolve()),
+        )
+        out = args.out or default_show_path(
+            symbol=sym,
+            day=show_day,
+            strategy=args.strategy,
+            data_root=args.data_root,
+        )
+        save_show(recording, out)
+        print("show:", out.resolve())
+        print(
+            json.dumps(
+                {
+                    "bars": len(recording.events),
+                    "fills": recording.session.get("fills_count"),
+                    "show_day": show_day,
+                }
+            )
+        )
+        return
+
+    if args.cmd == "paper-show":
+        import asyncio
+
+        from crucibo.paper.show import run_show_from_file
+
+        url = f"http://{args.host}:{args.port}/"
+        print(f"show dashboard: {url}", file=sys.stderr)
+        print("recording:", args.recording.resolve(), file=sys.stderr)
+        try:
+            asyncio.run(
+                run_show_from_file(
+                    recording_path=args.recording,
+                    host=args.host,
+                    port=args.port,
+                    tick_delay=args.tick_delay,
+                    loop_pause=args.loop_pause,
+                    loop_forever=not args.once,
+                )
+            )
+        except KeyboardInterrupt:
+            print("interrupted — show stopped", file=sys.stderr)
+            raise SystemExit(130) from None
+        except Exception as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+        return
+
+    if args.cmd == "live-equities":
+        import asyncio
+
+        from crucibo.live.equity_broker import build_equity_broker
+        from crucibo.live.risk import validate_live_safety
+        from crucibo.live.runtime import (
+            LiveEquityConfig,
+            LiveEquityRuntime,
+            run_live_equities_session,
+        )
+        from crucibo.paper.alphavantage_poll import stream_new_alphavantage_bars
+        from crucibo.paper.engine import PaperConfig
+        from crucibo.paper.session import write_paper_manifest
+
+        try:
+            validate_live_safety(
+                max_loss_usd=args.max_loss_usd,
+                max_notional_usd=args.max_notional_usd,
+                allow_no_kill=args.allow_no_kill,
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        if args.broker == "alpaca_paper" and args.i_accept_real_capital:
+            print(
+                "note: alpaca_paper uses paper capital; --i-accept-real-capital is ignored",
+                file=sys.stderr,
+            )
+
+        try:
+            strat = resolve_strategy(
+                args.strategy,
+                target_shares=args.target_shares,
+                model_path=args.model,
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        paper_cfg = PaperConfig(
+            initial_cash=args.initial_cash,
+            slip_bps=args.slip_bps,
+            fee_per_share=args.fee_per_share,
+            max_loss_usd=args.max_loss_usd,
+            max_position_shares=args.max_position_shares,
+            max_notional_usd=args.max_notional_usd,
+            flatten_on_kill=args.flatten_on_kill,
+        )
+        interval = args.interval
+        if args.rth_only is None:
+            rth_only = interval not in {"daily", "1d"}
+        else:
+            rth_only = args.rth_only
+
+        try:
+            broker = build_equity_broker(
+                kind=args.broker,
+                initial_cash=args.initial_cash,
+                slip_bps=args.slip_bps,
+                fee_per_share=args.fee_per_share,
+                live_money=False,
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        live_cfg = LiveEquityConfig(
+            paper=paper_cfg,
+            rth_only=rth_only,
+            reconcile_every_n=args.reconcile_every,
+            kill_on_reconcile_fail=True,
+            mode="live_equities",
+            enforce_latency_budgets=args.enforce_latency_budgets,
+        )
+        runtime = LiveEquityRuntime(broker=broker, cfg=live_cfg)
+        sym = args.symbol.upper()
+        runs_parent = _runs_parent(args.data_root)
+        run_id = args.run_id or make_run_id(
+            prefix="live_eq",
+            symbol=sym,
+            strategy=args.strategy,
+        )
+        print(
+            f"live-equities: symbol={sym} broker={args.broker} rth_only={rth_only}",
+            file=sys.stderr,
+        )
+        print(
+            "note: Alpha Vantage free tier is ~15-min delayed; budget 25 API calls/day",
+            file=sys.stderr,
+        )
+
+        stream = stream_new_alphavantage_bars(
+            symbol=sym,
+            interval=interval,
+            poll_seconds=args.poll_seconds,
+        )
+        try:
+            state = asyncio.run(
+                run_live_equities_session(
+                    runtime=runtime,
+                    strategy=strat,
+                    tick_stream=stream,
+                    max_ticks=args.max_ticks,
+                )
+            )
+        except KeyboardInterrupt:
+            print("interrupted — live-equities stopped", file=sys.stderr)
+            raise SystemExit(130) from None
+        except Exception as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+        finally:
+            close = getattr(broker, "close", None)
+            if callable(close):
+                close()
+
+        # Mirror fills into paper state for shared bundle writer
+        state.paper.fills = list(state.paper.fills)
+        state.paper.equity_curve = [
+            {
+                "ts_event_ns": p["ts_event_ns"],
+                "equity_marked": p["equity_marked"],
+                "cash": p["cash"],
+                "shares": p["shares"],
+                "mid_price": p["mid_price"],
+                "drawdown": p.get("drawdown", 0.0),
+            }
+            for p in state.equity_curve
+        ]
+        order_log = getattr(broker, "order_log", None)
+        manifest_path = write_paper_manifest(
+            run_id=run_id,
+            runs_parent=runs_parent,
+            feed="alphavantage",
+            symbol=sym,
+            interval=interval,
+            strategy_name=args.strategy,
+            model_path=str(args.model.resolve()) if args.model else None,
+            cfg=paper_cfg,
+            state=state.paper,
+            tick_count=state.tick_count,
+            poll_seconds=args.poll_seconds,
+            mode="live_equities",
+            order_log=list(order_log) if order_log is not None else None,
+            extra_manifest={
+                "broker": getattr(broker, "name", args.broker),
+                "rth_only": rth_only,
+                "latency_tracker": runtime.latency.summary(),
+                "latency_budgets": runtime.budgets.summary(),
+                "last_reconcile": state.last_reconcile,
+                "reconcile_failures": state.reconcile_failures,
+                "order_book": state.order_book.to_log(),
+                "account": state.account.snapshot({sym: state.paper.last_mark_price or 0.0}),
+                "asset_class": "us_equities",
+            },
+        )
+        # Persist order book + budgets alongside bundle
+        out_dir = manifest_path.parent
+        (out_dir / "order_book.json").write_text(
+            json.dumps(state.order_book.to_log(), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print("live run:", out_dir)
+        print("manifest:", manifest_path)
+        if state.killed:
+            print("killed:", state.kill_reason, file=sys.stderr)
+        return
+
+    if args.cmd in {"paper-alphavantage", "paper-dashboard", "paper-binance"}:
+        import asyncio
+
+        from crucibo.live.risk import validate_live_safety
+        from crucibo.paper.alphavantage_poll import stream_new_alphavantage_bars
+        from crucibo.paper.binance_ws import stream_closed_klines
+        from crucibo.paper.engine import PaperConfig
+        from crucibo.paper.session import (
+            build_execution_backend,
+            run_paper_session_tracked,
+            write_paper_manifest,
+        )
+
+        feed = "binance" if args.cmd == "paper-binance" else getattr(args, "feed", "alphavantage")
+        interval = _paper_interval(feed, getattr(args, "interval", None))
+        runs_parent = _runs_parent(args.data_root)
+        mode = getattr(args, "mode", "paper")
+        try:
+            validate_live_safety(
+                max_loss_usd=args.max_loss_usd,
+                max_notional_usd=getattr(args, "max_notional_usd", None),
+                allow_no_kill=getattr(args, "allow_no_kill", False),
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        try:
+            strat = resolve_strategy(
+                args.strategy,
+                target_shares=args.target_shares,
+                model_path=args.model,
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        cfg = PaperConfig(
+            initial_cash=args.initial_cash,
+            slip_bps=args.slip_bps,
+            fee_per_share=args.fee_per_share,
+            max_loss_usd=args.max_loss_usd,
+            max_position_shares=args.max_position_shares,
+            max_notional_usd=getattr(args, "max_notional_usd", None),
+            flatten_on_kill=getattr(args, "flatten_on_kill", False),
+        )
+        sym = args.symbol.upper()
+        prefix = "live" if mode == "live_dry_run" else "paper"
+        run_id = args.run_id or make_run_id(prefix=prefix, symbol=sym, strategy=args.strategy)
+        poll_seconds = getattr(args, "poll_seconds", 300.0)
+        backend, broker, latency = build_execution_backend(cfg=cfg, mode=mode)
+        model_path_str = str(args.model.resolve()) if args.model else None
+        interrupted = False
+        state = None
+        tick_count = 0
+        # Snapshot for interrupt-safe partial flush
+        _partial: dict = {"state": None, "ticks": 0}
+
+        def _on_tick(_tick, paper_state) -> None:
+            nonlocal tick_count
+            tick_count += 1
+            _partial["state"] = paper_state
+            _partial["ticks"] = tick_count
+            eq = paper_state.cash + paper_state.shares * _tick.price
+            print(
+                json.dumps(
+                    {
+                        "feed": feed,
+                        "mode": mode,
+                        "ts_event_ns": _tick.ts_event_ns,
+                        "price": _tick.price,
+                        "shares": paper_state.shares,
+                        "cash": round(paper_state.cash, 2),
+                        "equity": round(eq, 2),
+                        "killed": paper_state.killed,
+                    }
+                )
+            )
+
+        def _flush_bundle(final_state, n_ticks: int, was_interrupted: bool) -> Path:
+            return write_paper_manifest(
+                run_id=run_id,
+                runs_parent=runs_parent,
+                feed=feed,
+                symbol=sym,
+                interval=interval,
+                strategy_name=args.strategy,
+                model_path=model_path_str,
+                cfg=cfg,
+                state=final_state,
+                tick_count=n_ticks,
+                poll_seconds=poll_seconds if feed == "alphavantage" else None,
+                mode=mode,
+                interrupted=was_interrupted,
+                order_log=broker.order_log if broker is not None else None,
+                extra_manifest={"latency_tracker": latency.summary()},
+            )
+
+        if args.cmd == "paper-dashboard":
+            from crucibo.paper.dashboard import run_paper_dashboard
+
+            url = f"http://{args.host}:{args.port}/"
+            print(f"dashboard: {url}", file=sys.stderr)
+            if feed == "alphavantage":
+                print(
+                    "note: Alpha Vantage free tier is ~15-min delayed; budget 25 API calls/day",
+                    file=sys.stderr,
+                )
+            try:
+                state = asyncio.run(
+                    run_paper_dashboard(
+                        strategy=strat,
+                        feed=feed,
+                        symbol=sym,
+                        interval=interval,
+                        strategy_name=args.strategy,
+                        model_path=args.model,
+                        cfg=cfg,
+                        host=args.host,
+                        port=args.port,
+                        poll_seconds=poll_seconds,
+                        max_ticks=args.max_ticks,
+                        runs_parent=runs_parent,
+                        run_id=run_id,
+                        mode=mode,
+                        backend=backend,
+                        broker=broker,
+                        latency=latency,
+                    )
+                )
+            except KeyboardInterrupt:
+                interrupted = True
+                print("interrupted — flushing paper run bundle", file=sys.stderr)
+                raise SystemExit(130) from None
+            except Exception as exc:
+                print(exc, file=sys.stderr)
+                raise SystemExit(2) from exc
+
+            run_dir = runs_parent / "runs" / run_id
+            print("paper run:", run_dir)
+            print("manifest:", run_dir / "run_manifest.json")
+            if state.killed:
+                print("killed:", state.kill_reason, file=sys.stderr)
+            return
+
+        if feed == "alphavantage":
+            print(
+                "note: Alpha Vantage free tier is ~15-min delayed; budget 25 API calls/day",
+                file=sys.stderr,
+            )
+            tick_stream = stream_new_alphavantage_bars(
+                symbol=sym,
+                interval=interval,
+                poll_seconds=poll_seconds,
+            )
+        else:
+            tick_stream = stream_closed_klines(symbol=sym, interval=interval)
+
+        try:
+            result = asyncio.run(
+                run_paper_session_tracked(
+                    strategy=strat,
+                    cfg=cfg,
+                    tick_stream=tick_stream,
+                    max_ticks=args.max_ticks,
+                    on_tick=_on_tick,
+                    backend=backend,
+                    mode=mode,
+                )
+            )
+            state = result.state
+            tick_count = result.tick_count
+        except KeyboardInterrupt:
+            interrupted = True
+            print("interrupted — flushing paper run bundle", file=sys.stderr)
+            if _partial["state"] is not None:
+                mp = _flush_bundle(_partial["state"], int(_partial["ticks"]), True)
+                print("paper run:", mp.parent)
+                print("manifest:", mp)
+            raise SystemExit(130) from None
+        except Exception as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        manifest_path = _flush_bundle(state, tick_count, interrupted)
+        print("paper run:", manifest_path.parent)
+        print("manifest:", manifest_path)
+        if state.killed:
+            print("killed:", state.kill_reason, file=sys.stderr)
+        return
+
+    if args.cmd != "replay-parquet":
+        parser.error(f"unknown {args.cmd!r}")
+
+    cfg = ReplayConfig(
+        slip_bps=args.slip_bps,
+        fee_per_share=args.fee_per_share,
+        initial_cash=args.initial_cash,
+    )
+    runs_parent = _runs_parent(args.data_root)
+
+    try:
+        strat = resolve_strategy(
+            args.strategy,
+            target_shares=args.target_shares,
+            model_path=args.model,
+        )
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    ticks = filter_price_bars(parquet_to_ticks(args.ticks.resolve()))
+    sym = ticks[0].symbol if ticks else "EMPTY"
+    run_id = args.run_id or make_run_id(prefix="pq", symbol=sym, strategy=args.strategy)
+
+    try:
+        outcome = replay_ticks(strat, ticks, cfg)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    pn = summarize_pnl(cfg, outcome)
+    manifest_core = {
+        "cmd": args.cmd,
+        "strategy": args.strategy,
+        "tick_count": len(ticks),
+        "fills_count": len(outcome.fills),
+        "replay_config": {
+            "initial_cash": cfg.initial_cash,
+            "slip_bps": cfg.slip_bps,
+            "fee_per_share": cfg.fee_per_share,
+        },
+        "pnl_summary_approx": pn,
+        "final_cash": outcome.final_cash,
+        "final_shares": outcome.final_shares,
+        "git_sha": _git_sha_optional(),
+        "runs_parent": str(runs_parent),
+        "tick_file": str(args.ticks.resolve()),
+    }
+    if args.model is not None:
+        manifest_core["model_path"] = str(args.model.resolve())
+
+    out_dir = write_run_bundle(
+        outcome=outcome,
+        manifest={"run_id": run_id} | manifest_core,
+        run_id=run_id,
+        runs_parent=runs_parent,
+    )
+    print("run:", out_dir)
+    print(json.dumps(pn))
+
+
+if __name__ == "__main__":
+    main()

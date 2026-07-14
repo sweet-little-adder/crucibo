@@ -1,66 +1,79 @@
 # Roadmap
 
-Phases are **capabilities**, not calendar promises. Revisit when ingest, replay, or live assumptions change.
+Phases are **capabilities**, not calendar promises.
 
 ## Principles
 
-- **Real data first** — Alpha Vantage free tier for daily/intraday bars; Polygon optional for ticks; more venues as needed.
+- **US equities first** — Alpha Vantage (free) + optional Polygon ticks; Alpaca paper for signed orders.
+- **Crypto optional** — Binance USD-M paper/ingest is supported but not the primary path.
 - **Event-time honesty** — no lookahead; manifests on every run.
-- **Kill bad ideas cheaply** — replay with fees → paper with kill switch → live with capital limits.
-- **Same path upward** — research is how we *earn* live; it is not a permanent identity of “not trading infra.”
+- **Paper before live** — kill switch required on any real-time loop.
+- **Same path upward** — paper, dry-run, and live equities share risk/order/recon surfaces.
 
 ---
 
 ## Phase 1 — Ingest + schema (done)
 
-- [x] Typed `TradeTick` / `NewsEvent` schemas + Parquet I/O
-- [x] **Alpha Vantage** daily + intraday bar ingest
-- [x] Polygon trades ingest (paid entitlement)
-- [x] RSS news ingest (free)
+- [x] Typed `TradeTick` / `NewsEvent` + Parquet I/O
+- [x] Alpha Vantage daily + intraday (**primary**)
+- [x] Polygon trades (paid, optional)
+- [x] Binance USD-M futures klines (optional crypto)
+- [x] RSS news (free)
 - [x] Silver layout + per-slice manifests
 
 ---
 
-## Phase 2 — Replay + naive strategy (done)
+## Phase 2 — Replay + strategies (done)
 
 - [x] `replay_ticks` sorted by `ts_event_ns`
-- [x] Strategies: `flat`, `buy_hold`, `neural` (MLP checkpoint)
+- [x] Strategies: `flat`, `buy_hold`, `neural`, `aapl_mlp_v1`
 - [x] Run bundles: fills, equity curve, manifest
-- [x] **CLI**: `replay-parquet`, `train-from-parquet`
+- [x] CLI: `replay-parquet`, `train-from-parquet`, v2 `ingest` / `backtest` / `report`
 
 ---
 
 ## Phase 3 — Research discipline (in progress)
 
-- [ ] **Walk-forward CLI** — train date range vs OOS date range on same parquet
-- [ ] Costs model object vs loose floats
-- [ ] Session clock (RTH) for intraday bars
-- [ ] Attribution hooks in manifest
+- [x] Walk-forward in morning-star
+- [x] PyTorch trainer export for crucibo
+- [ ] Costs model object vs loose floats in crucibo
+- [x] Session clock (RTH) for US equities live path
+- [ ] Attribution hooks in replay manifest
 
 ---
 
-## Phase 4 — Paper on live feeds (next)
+## Phase 4 — Paper on live feeds (done)
 
-- [ ] Paper-trading loop on a live market data feed (poll or WebSocket)
-- [ ] Explicit kill switch + max loss / max position
-- [ ] Record paper runs under `data/runs/` (equity snapshots, kill reason)
-- [ ] Merge `NewsEvent` + bars by event time in replay (optional parallel track)
+- [x] Paper trading — `paper-alphavantage` (stocks) + optional `paper-binance`
+- [x] Kill switch + position/notional caps + required safety guards
+- [x] Record under `data/runs/` (fills, equity, latency)
+- [x] Interrupt-safe partial flush
+- [x] Dashboard SSE + show recording
 
 ---
 
-## Phase 5 — Live trading
+## Phase 5 — Live equities path (done for Aim foundation)
 
-- [ ] Broker bridge (order state machine, auth, reconnect, client order IDs)
-- [ ] Capital limits + kill switch enforced on the live path (same vocabulary as paper)
-- [ ] Reconciliation: intended position vs exchange position
-- [ ] Separate design doc before real capital (risk, ops, failure modes)
+- [x] **`live-equities` CLI** — stocks-first primary live command
+- [x] Execution backend seam (paper / live_dry_run / live equities runtime)
+- [x] Order state machine (`OrderBook` / phases)
+- [x] Local account book + **broker reconcile**
+- [x] Dry-run equity broker (default, no keys)
+- [x] **Alpaca paper** signed REST broker (optional keys)
+- [x] Capital limits + kill enforced on live path
+- [x] Flatten-on-kill
+- [x] Latency budgets (warn / optional enforce)
+- [ ] Alpaca **live money** endpoint (requires explicit ops design + funding)
+- [ ] Multi-symbol portfolio live loop
 
 ---
 
 ## Phase 6 — HFT-shaped infra
 
-- [ ] Latency budgets on critical path; continuous profiling
-- [ ] Hot-path isolation (strategy decision vs I/O vs risk)
-- [ ] Native acceleration only where profiler proves need (see [STACK.md](STACK.md))
-- [ ] Finer market data (ticks / L2) when venue + cost justify it
-- [ ] Co-lo / competitive nanosecond claims — only with hardware + venue economics; not a README flex
+- [x] Latency as measured property (feed lag, decision, tick-to-order)
+- [x] Hot-path seam: strategy → risk → order SM → broker → recon
+- [x] Configurable latency budgets on critical path
+- [ ] Continuous profiling dashboards / CI budgets
+- [ ] Native acceleration only where profiler proves need
+- [ ] L2 / tick hot path when venue + cost justify it
+- [ ] Co-lo claims only with hardware + venue economics
