@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crucibo"
 version = "0.1.0"
-description = "US equities research sandbox — Alpha Vantage ingest, replay, simulation"
+description = "US equities trading infrastructure — ingest, replay, paper, live"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

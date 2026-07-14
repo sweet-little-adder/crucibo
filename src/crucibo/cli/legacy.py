@@ -80,8 +80,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="crucibo",
         description=(
-            "US equities ingest + replay on real market data — "
-            "read docs/HANDOFF.md for continuity when Cursor is closed."
+            "US equities trading infrastructure (stocks-first): ingest, replay, "
+            "paper, and live. Crypto/Binance is optional. See docs/HANDOFF.md."
         ),
     )
     subs = parser.add_subparsers(dest="cmd", required=True)
@@ -307,6 +307,76 @@ def main() -> None:
     p_dash.add_argument("--port", type=int, default=8765)
     p_dash.add_argument("--run-id", default=None)
     p_dash.add_argument("--data-root", type=Path, default=None)
+
+    p_live = subs.add_parser(
+        "live-equities",
+        help=(
+            "US equities live path (primary): Alpha Vantage feed + dry-run or "
+            "Alpaca paper broker, order SM, risk, recon, latency budgets"
+        ),
+    )
+    p_live.add_argument("--symbol", required=True, help="US ticker, e.g. AAPL")
+    p_live.add_argument(
+        "--interval",
+        default="5min",
+        help="daily | 1min | 5min | 15min | 30min | 60min",
+    )
+    p_live.add_argument(
+        "--broker",
+        default="dry_run",
+        choices=["dry_run", "alpaca_paper"],
+        help="dry_run: local virtual broker (default); alpaca_paper: signed Alpaca paper REST",
+    )
+    p_live.add_argument(
+        "--strategy",
+        default="flat",
+        help="flat | buy_hold | aapl_mlp_v1",
+    )
+    p_live.add_argument("--target-shares", type=int, default=100)
+    p_live.add_argument("--model", type=Path, default=None)
+    p_live.add_argument("--slip-bps", type=float, default=2.0)
+    p_live.add_argument("--fee-per-share", type=float, default=0.005)
+    p_live.add_argument("--initial-cash", type=float, default=1_000_000.0)
+    p_live.add_argument("--max-loss-usd", type=float, default=None)
+    p_live.add_argument("--max-position-shares", type=int, default=None)
+    p_live.add_argument("--max-notional-usd", type=float, default=None)
+    p_live.add_argument("--flatten-on-kill", action="store_true")
+    p_live.add_argument(
+        "--allow-no-kill",
+        action="store_true",
+        help="Allow running without max-loss/notional (unsafe)",
+    )
+    p_live.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=300.0,
+        help="Alpha Vantage poll interval (free tier: 25 req/day)",
+    )
+    p_live.add_argument("--max-ticks", type=int, default=None)
+    p_live.add_argument(
+        "--rth-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Only trade in US RTH 09:30–16:00 ET (default: on for intraday, off for daily)",
+    )
+    p_live.add_argument(
+        "--reconcile-every",
+        type=int,
+        default=1,
+        help="Reconcile local book vs broker every N ticks (0=never)",
+    )
+    p_live.add_argument(
+        "--enforce-latency-budgets",
+        action="store_true",
+        help="Kill session if decision/tick-to-order hard latency budgets trip",
+    )
+    p_live.add_argument(
+        "--i-accept-real-capital",
+        action="store_true",
+        help="Required to use live money endpoints (not enabled for alpaca_paper)",
+    )
+    p_live.add_argument("--run-id", default=None)
+    p_live.add_argument("--data-root", type=Path, default=None)
 
     p_record = subs.add_parser(
         "record-show",
@@ -619,18 +689,187 @@ def main() -> None:
             raise SystemExit(2) from exc
         return
 
+    if args.cmd == "live-equities":
+        import asyncio
+
+        from crucibo.live.equity_broker import build_equity_broker
+        from crucibo.live.risk import validate_live_safety
+        from crucibo.live.runtime import (
+            LiveEquityConfig,
+            LiveEquityRuntime,
+            run_live_equities_session,
+        )
+        from crucibo.paper.alphavantage_poll import stream_new_alphavantage_bars
+        from crucibo.paper.engine import PaperConfig
+        from crucibo.paper.session import write_paper_manifest
+
+        try:
+            validate_live_safety(
+                max_loss_usd=args.max_loss_usd,
+                max_notional_usd=args.max_notional_usd,
+                allow_no_kill=args.allow_no_kill,
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        if args.broker == "alpaca_paper" and args.i_accept_real_capital:
+            print(
+                "note: alpaca_paper uses paper capital; --i-accept-real-capital is ignored",
+                file=sys.stderr,
+            )
+
+        try:
+            strat = resolve_strategy(
+                args.strategy,
+                target_shares=args.target_shares,
+                model_path=args.model,
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        paper_cfg = PaperConfig(
+            initial_cash=args.initial_cash,
+            slip_bps=args.slip_bps,
+            fee_per_share=args.fee_per_share,
+            max_loss_usd=args.max_loss_usd,
+            max_position_shares=args.max_position_shares,
+            max_notional_usd=args.max_notional_usd,
+            flatten_on_kill=args.flatten_on_kill,
+        )
+        interval = args.interval
+        if args.rth_only is None:
+            rth_only = interval not in {"daily", "1d"}
+        else:
+            rth_only = args.rth_only
+
+        try:
+            broker = build_equity_broker(
+                kind=args.broker,
+                initial_cash=args.initial_cash,
+                slip_bps=args.slip_bps,
+                fee_per_share=args.fee_per_share,
+                live_money=False,
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
+        live_cfg = LiveEquityConfig(
+            paper=paper_cfg,
+            rth_only=rth_only,
+            reconcile_every_n=args.reconcile_every,
+            kill_on_reconcile_fail=True,
+            mode="live_equities",
+            enforce_latency_budgets=args.enforce_latency_budgets,
+        )
+        runtime = LiveEquityRuntime(broker=broker, cfg=live_cfg)
+        sym = args.symbol.upper()
+        runs_parent = _runs_parent(args.data_root)
+        run_id = args.run_id or make_run_id(
+            prefix="live_eq",
+            symbol=sym,
+            strategy=args.strategy,
+        )
+        print(
+            f"live-equities: symbol={sym} broker={args.broker} rth_only={rth_only}",
+            file=sys.stderr,
+        )
+        print(
+            "note: Alpha Vantage free tier is ~15-min delayed; budget 25 API calls/day",
+            file=sys.stderr,
+        )
+
+        stream = stream_new_alphavantage_bars(
+            symbol=sym,
+            interval=interval,
+            poll_seconds=args.poll_seconds,
+        )
+        try:
+            state = asyncio.run(
+                run_live_equities_session(
+                    runtime=runtime,
+                    strategy=strat,
+                    tick_stream=stream,
+                    max_ticks=args.max_ticks,
+                )
+            )
+        except KeyboardInterrupt:
+            print("interrupted — live-equities stopped", file=sys.stderr)
+            raise SystemExit(130) from None
+        except Exception as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+        finally:
+            close = getattr(broker, "close", None)
+            if callable(close):
+                close()
+
+        # Mirror fills into paper state for shared bundle writer
+        state.paper.fills = list(state.paper.fills)
+        state.paper.equity_curve = [
+            {
+                "ts_event_ns": p["ts_event_ns"],
+                "equity_marked": p["equity_marked"],
+                "cash": p["cash"],
+                "shares": p["shares"],
+                "mid_price": p["mid_price"],
+                "drawdown": p.get("drawdown", 0.0),
+            }
+            for p in state.equity_curve
+        ]
+        order_log = getattr(broker, "order_log", None)
+        manifest_path = write_paper_manifest(
+            run_id=run_id,
+            runs_parent=runs_parent,
+            feed="alphavantage",
+            symbol=sym,
+            interval=interval,
+            strategy_name=args.strategy,
+            model_path=str(args.model.resolve()) if args.model else None,
+            cfg=paper_cfg,
+            state=state.paper,
+            tick_count=state.tick_count,
+            poll_seconds=args.poll_seconds,
+            mode="live_equities",
+            order_log=list(order_log) if order_log is not None else None,
+            extra_manifest={
+                "broker": getattr(broker, "name", args.broker),
+                "rth_only": rth_only,
+                "latency_tracker": runtime.latency.summary(),
+                "latency_budgets": runtime.budgets.summary(),
+                "last_reconcile": state.last_reconcile,
+                "reconcile_failures": state.reconcile_failures,
+                "order_book": state.order_book.to_log(),
+                "account": state.account.snapshot({sym: state.paper.last_mark_price or 0.0}),
+                "asset_class": "us_equities",
+            },
+        )
+        # Persist order book + budgets alongside bundle
+        out_dir = manifest_path.parent
+        (out_dir / "order_book.json").write_text(
+            json.dumps(state.order_book.to_log(), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print("live run:", out_dir)
+        print("manifest:", manifest_path)
+        if state.killed:
+            print("killed:", state.kill_reason, file=sys.stderr)
+        return
+
     if args.cmd in {"paper-alphavantage", "paper-dashboard", "paper-binance"}:
         import asyncio
 
         from crucibo.live.risk import validate_live_safety
+        from crucibo.paper.alphavantage_poll import stream_new_alphavantage_bars
+        from crucibo.paper.binance_ws import stream_closed_klines
         from crucibo.paper.engine import PaperConfig
         from crucibo.paper.session import (
             build_execution_backend,
             run_paper_session_tracked,
             write_paper_manifest,
         )
-        from crucibo.paper.alphavantage_poll import stream_new_alphavantage_bars
-        from crucibo.paper.binance_ws import stream_closed_klines
 
         feed = "binance" if args.cmd == "paper-binance" else getattr(args, "feed", "alphavantage")
         interval = _paper_interval(feed, getattr(args, "interval", None))

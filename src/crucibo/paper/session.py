@@ -7,16 +7,19 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from crucibo.live.broker import DryRunBroker
-from crucibo.live.execution import DryRunLiveBackend, ExecutionBackend, PaperExecutionBackend
-from crucibo.live.latency import LatencyTracker
 from crucibo.models import TradeTick
 from crucibo.paper.alphavantage_poll import OnPoll, stream_new_alphavantage_bars
 from crucibo.paper.binance_ws import stream_closed_klines
 from crucibo.paper.bundle import write_paper_run_bundle
 from crucibo.paper.engine import PaperConfig, PaperState
 from crucibo.replay.strategies import TickStrategy
+
+if TYPE_CHECKING:
+    from crucibo.live.broker import DryRunBroker
+    from crucibo.live.execution import ExecutionBackend
+    from crucibo.live.latency import LatencyTracker
 
 OnTick = Callable[[TradeTick, PaperState], Awaitable[None] | None]
 
@@ -64,7 +67,12 @@ async def run_paper_session_tracked(
     backend: ExecutionBackend | None = None,
     mode: str = "paper",
 ) -> PaperSessionResult:
-    exec_backend = backend or PaperExecutionBackend(cfg=cfg)
+    if backend is None:
+        from crucibo.live.execution import PaperExecutionBackend
+
+        exec_backend: ExecutionBackend = PaperExecutionBackend(cfg=cfg)
+    else:
+        exec_backend = backend
     state = PaperState(cash=cfg.initial_cash, equity_peak=cfg.initial_cash)
     index = 0
     async for tick in tick_stream:
@@ -142,6 +150,10 @@ def build_execution_backend(
     mode: str = "paper",
 ) -> tuple[ExecutionBackend, DryRunBroker | None, LatencyTracker]:
     """Construct paper or live-dry-run backend + optional order-log broker."""
+
+    from crucibo.live.broker import DryRunBroker
+    from crucibo.live.execution import DryRunLiveBackend, PaperExecutionBackend
+    from crucibo.live.latency import LatencyTracker
 
     latency = LatencyTracker()
     if mode == "live_dry_run":

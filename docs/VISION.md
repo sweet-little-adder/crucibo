@@ -2,29 +2,29 @@
 
 ## Thesis
 
-**Crucibo** is systematic **trading infrastructure**: market data → decision → risk → execution, with clocks and economics that stay honest under scrutiny.
+**Crucibo** is systematic **trading infrastructure for US equities first**: market data → decision → risk → execution, with clocks and economics that stay honest under scrutiny.
 
-**Crucibo** owns data, replay, paper/live runtime, fills, fees, kill switches, and latency measurement.  
+Crypto (Binance) is an **optional** venue, not the product identity.
+
+**Crucibo** owns data, replay, paper/live runtime, fills, fees, kill switches, order state, reconcile, and latency measurement.  
 **morning-star** (separate repo) owns features, training, walk-forward, and checkpoint export.
-
-Today the stack bootstraps from limited-scope research. The destination is **live trading** and **HFT-shaped systems** — deterministic event time, measurable latency, kill switches, capital limits, and a path from replay → paper → live dry-run → live that does not rewrite the world at each stage.
 
 ## Outcomes
 
-1. **Ingest** — Normalized ticks/bars into partitioned, immutable archives.
-2. **Clock model** — Explicit event time, ingest time, never “pretend we saw the future.”
+1. **Ingest** — Normalized US equity bars/ticks (Alpha Vantage primary; Polygon optional).
+2. **Clock model** — Event time + ingest time; **RTH session clock** on the live equities path.
 3. **Simulator** — Deterministic backtest/replay with PnL, fills, commissions, slip.
-4. **Paper** — Live feeds, virtual fills, required kill/notional guards, full run bundles under `data/runs/`.
-5. **Live path** — Same execution backend surface; dry-run broker today; signed REST tomorrow.
-6. **Risk** — Max loss, max position, max notional — first-class pre-trade checks.
-7. **Latency** — Feed lag and decision path recorded as stats, not marketing claims.
+4. **Paper** — Live equity feeds, virtual fills, required kill/notional guards, `data/runs/` bundles.
+5. **Live equities** — Order state machine, local account book, broker reconcile, dry-run or **Alpaca paper** signed REST.
+6. **Risk** — Max loss, max position, max notional — pre-trade and mark-to-market.
+7. **Latency** — Measured feed lag / decision / tick-to-order with optional hard budgets.
 
-## Non-goals (deferred engineering, not identity)
+## Non-goals (deferred)
 
 - Co-located competitive HFT without colo + venue economics.
-- Full Reg NMS / borrow-locate before a simpler live path works.
-- Live trading without kill switch + capital limits.
+- Crypto-first product positioning.
+- Live money trading without explicit capital acceptance and ops design.
 
 ## Success criterion
 
-Train → replay → paper on live feed → live dry-run produces the same *decision shape* on overlapping history; every run is reproducible from manifest + data slice; latency is measured on the path that will carry real orders.
+Train → replay → paper equities → `live-equities` (dry-run or Alpaca paper) share the same decision/risk/order shape; every run is reproducible from manifest + data slice; latency is measured on the path that will carry real stock orders.
