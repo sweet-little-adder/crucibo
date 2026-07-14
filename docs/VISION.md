@@ -2,34 +2,29 @@
 
 ## Thesis
 
-**Crucibo + morning-star** is an execution and evaluation plane for systematic models: ingest real market data, train in a separate repo, replay and paper-trade with honest event-time clocks, explicit economics, and auditable manifests.
+**Crucibo** is systematic **trading infrastructure**: market data → decision → risk → execution, with clocks and economics that stay honest under scrutiny.
 
-**Crucibo** owns data, replay, paper/live runtime, fills, fees, and kill switches.  
-**morning-star** owns features, training, walk-forward, and checkpoint export.
+**Crucibo** owns data, replay, paper/live runtime, fills, fees, kill switches, and latency measurement.  
+**morning-star** (separate repo) owns features, training, walk-forward, and checkpoint export.
 
-Non-negotiable: no lookahead, reproducible runs, kill switches before real capital.
+Today the stack bootstraps from limited-scope research. The destination is **live trading** and **HFT-shaped systems** — deterministic event time, measurable latency, kill switches, capital limits, and a path from replay → paper → live dry-run → live that does not rewrite the world at each stage.
 
 ## Outcomes
 
-1. **Ingest** — Normalized `TradeTick` archives (Alpha Vantage, Binance futures, optional Polygon/RSS).
-2. **Model harness** — morning-star exports versioned artifacts; crucibo loads them as `TickStrategy` without importing PyTorch.
-3. **Replay** — Deterministic backtest with PnL, fills, slippage, run manifests.
-4. **Walk-forward** — Train window vs OOS window in morning-star before trusting a checkpoint.
-5. **Paper trading** — Live Binance kline WebSocket feed, virtual fills, drawdown kill switch.
-6. **Risk scaffolding** — Max position, max loss USD, explicit kill reasons in manifests.
+1. **Ingest** — Normalized ticks/bars into partitioned, immutable archives.
+2. **Clock model** — Explicit event time, ingest time, never “pretend we saw the future.”
+3. **Simulator** — Deterministic backtest/replay with PnL, fills, commissions, slip.
+4. **Paper** — Live feeds, virtual fills, required kill/notional guards, full run bundles under `data/runs/`.
+5. **Live path** — Same execution backend surface; dry-run broker today; signed REST tomorrow.
+6. **Risk** — Max loss, max position, max notional — first-class pre-trade checks.
+7. **Latency** — Feed lag and decision path recorded as stats, not marketing claims.
 
-## Near-term goals
+## Non-goals (deferred engineering, not identity)
 
-- Richer features in morning-star (funding, mark price, news embeddings).
-- Multi-stream replay (bars + news by event time).
-- Live broker bridge (separate design doc, explicit capital limits).
-
-## Non-goals (for now)
-
-- Colocated HFT / microstructure queue simulation.
-- Full Reg NMS / borrow-locate realism.
-- Live trading without kill switch + max-notional caps.
+- Co-located competitive HFT without colo + venue economics.
+- Full Reg NMS / borrow-locate before a simpler live path works.
+- Live trading without kill switch + capital limits.
 
 ## Success criterion
 
-Train in morning-star → replay in crucibo → paper on live feed produces the same *decisions* on overlapping history, and every run is reproducible from manifest + data slice.
+Train → replay → paper on live feed → live dry-run produces the same *decision shape* on overlapping history; every run is reproducible from manifest + data slice; latency is measured on the path that will carry real orders.

@@ -213,6 +213,10 @@ async def run_paper_dashboard(
     max_ticks: int | None = None,
     runs_parent: Path | None = None,
     run_id: str | None = None,
+    mode: str = "paper",
+    backend=None,
+    broker=None,
+    latency=None,
 ) -> PaperState:
     """Run paper session and stream state to browsers at http://host:port/."""
     from crucibo.replay.bundle import default_runs_parent, make_run_id
@@ -262,6 +266,7 @@ async def run_paper_dashboard(
         {
             "type": "session",
             "feed": meta.feed,
+            "mode": mode,
             "symbol": meta.symbol,
             "interval": meta.interval,
             "strategy": meta.strategy,
@@ -293,6 +298,7 @@ async def run_paper_dashboard(
                 max_ticks=max_ticks,
                 on_tick=_on_tick,
                 on_poll=_on_poll,
+                backend=backend,
             )
         elif feed_key == "binance":
             state = await run_paper_binance_session(
@@ -302,6 +308,7 @@ async def run_paper_dashboard(
                 cfg=cfg,
                 max_ticks=max_ticks,
                 on_tick=_on_tick,
+                backend=backend,
             )
         else:
             raise ValueError(f"unknown feed: {feed!r} (try alphavantage | binance)")
@@ -324,9 +331,12 @@ async def run_paper_dashboard(
 
     parent = runs_parent or default_runs_parent()
     rid = run_id or make_run_id(prefix="paper", symbol=meta.symbol, strategy=strategy_name)
-    out_dir = parent / rid
+    extra = {}
+    if latency is not None:
+        extra["latency_tracker"] = latency.summary()
     write_paper_manifest(
-        out_dir=out_dir,
+        run_id=rid,
+        runs_parent=parent,
         feed=meta.feed,
         symbol=meta.symbol,
         interval=interval,
@@ -336,5 +346,8 @@ async def run_paper_dashboard(
         state=state,
         tick_count=tick_count,
         poll_seconds=poll_seconds if feed_key == "alphavantage" else None,
+        mode=mode,
+        order_log=broker.order_log if broker is not None else None,
+        extra_manifest=extra or None,
     )
     return state

@@ -8,6 +8,7 @@ Phases are **capabilities**, not calendar promises.
 - **Event-time honesty** — no lookahead; manifests on every run.
 - **morning-star trains, crucibo executes** — artifact contract between repos.
 - **Paper before live** — kill switch required on any real-time loop.
+- **Same path upward** — paper and live dry-run share execution/risk surfaces.
 
 ---
 
@@ -24,7 +25,7 @@ Phases are **capabilities**, not calendar promises.
 ## Phase 2 — Replay + strategies (done)
 
 - [x] `replay_ticks` sorted by `ts_event_ns`
-- [x] Strategies: `flat`, `buy_hold`, `neural`, **`morning_star`**
+- [x] Strategies: `flat`, `buy_hold`, `neural`, **`morning_star` / `aapl_mlp_v1`**
 - [x] Run bundles: fills, equity curve, manifest
 - [x] CLI: `replay-parquet`, `train-from-parquet`
 
@@ -40,17 +41,37 @@ Phases are **capabilities**, not calendar promises.
 
 ---
 
-## Phase 4 — Multi-stream + paper (in progress)
+## Phase 4 — Paper on live feeds (done)
 
-- [x] **Paper trading** — `paper-binance` on live kline WebSocket (virtual fills)
+- [x] **Paper trading** — `paper-binance` / `paper-alphavantage` on live feeds
+- [x] Kill switch (`--max-loss-usd`) + position/notional caps
+- [x] Required safety guards (or explicit `--allow-no-kill`)
+- [x] **Record paper runs under `data/runs/`** — fills, equity curve, manifest, latency
+- [x] Interrupt-safe partial flush on Ctrl-C (when ticks already applied)
+- [x] Dashboard SSE + show recording
 - [ ] Merge `NewsEvent` + bars by event time in replay
 - [ ] News-aware features in morning-star
-- [ ] Record paper runs under `data/runs/` with equity snapshots
 
 ---
 
-## Phase 5 — Live (future)
+## Phase 5 — Live path (in progress)
 
-- Live broker integration (Binance API keys, order state machine)
-- Borrow/locate, Reg NMS — separate explicit design
-- Latency profiling before any “HFT” claims
+- [x] **Execution backend seam** — paper vs `live_dry_run` (`crucibo.live`)
+- [x] **Dry-run broker** — order intents + ack log, no real capital
+- [x] Pre-trade risk module (shared limits)
+- [x] Latency tracker (feed lag, decision, tick-to-order) in manifests
+- [x] CLI `--mode live_dry_run` on paper commands
+- [ ] Signed live broker (Binance API keys, order state machine)
+- [ ] Capital limits + kill enforced on real orders
+- [ ] Position reconciliation vs exchange
+
+---
+
+## Phase 6 — HFT-shaped infra
+
+- [x] Latency as measured property on paper/live-dry-run path
+- [x] Hot-path seam (strategy → risk → broker → fill)
+- [ ] Continuous profiling budgets on critical path
+- [ ] Native acceleration only where profiler proves need
+- [ ] Finer market data (ticks / L2) when venue + cost justify it
+- [ ] Co-lo / competitive nanosecond claims — only with hardware + venue economics

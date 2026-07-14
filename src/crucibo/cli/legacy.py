@@ -36,6 +36,46 @@ def _paper_interval(feed: str, interval: str | None) -> str:
     return "5min" if feed == "alphavantage" else "5m"
 
 
+def _add_paper_risk_args(p: argparse.ArgumentParser, *, default_fee: float) -> None:
+    p.add_argument("--slip-bps", type=float, default=2.0)
+    p.add_argument("--fee-per-share", type=float, default=default_fee)
+    p.add_argument("--initial-cash", type=float, default=1_000_000.0)
+    p.add_argument(
+        "--max-loss-usd",
+        type=float,
+        default=None,
+        help="Kill switch: stop if drawdown from equity peak exceeds this USD amount",
+    )
+    p.add_argument(
+        "--max-position-shares",
+        type=int,
+        default=None,
+        help="Hard cap on long shares",
+    )
+    p.add_argument(
+        "--max-notional-usd",
+        type=float,
+        default=None,
+        help="Hard cap on position notional (shares * mark)",
+    )
+    p.add_argument(
+        "--flatten-on-kill",
+        action="store_true",
+        help="Virtually flatten position when kill switch trips",
+    )
+    p.add_argument(
+        "--allow-no-kill",
+        action="store_true",
+        help="Allow running without --max-loss-usd / --max-notional-usd (unsafe)",
+    )
+    p.add_argument(
+        "--mode",
+        choices=["paper", "live_dry_run"],
+        default="paper",
+        help="paper: virtual fills; live_dry_run: same fills via order-intent broker path",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="crucibo",
@@ -184,16 +224,7 @@ def main() -> None:
         default=None,
         help="aapl_mlp_v1 artifact dir (manifest.json + weights.npz)",
     )
-    p_paper.add_argument("--slip-bps", type=float, default=2.0)
-    p_paper.add_argument("--fee-per-share", type=float, default=0.0)
-    p_paper.add_argument("--initial-cash", type=float, default=1_000_000.0)
-    p_paper.add_argument(
-        "--max-loss-usd",
-        type=float,
-        default=None,
-        help="Kill switch: stop if drawdown from equity peak exceeds this USD amount",
-    )
-    p_paper.add_argument("--max-position-shares", type=int, default=None)
+    _add_paper_risk_args(p_paper, default_fee=0.0)
     p_paper.add_argument(
         "--max-ticks",
         type=int,
@@ -231,11 +262,7 @@ def main() -> None:
         default=None,
         help="aapl_mlp_v1 artifact dir (manifest.json + weights.npz)",
     )
-    p_av_paper.add_argument("--slip-bps", type=float, default=2.0)
-    p_av_paper.add_argument("--fee-per-share", type=float, default=0.005)
-    p_av_paper.add_argument("--initial-cash", type=float, default=1_000_000.0)
-    p_av_paper.add_argument("--max-loss-usd", type=float, default=None)
-    p_av_paper.add_argument("--max-position-shares", type=int, default=None)
+    _add_paper_risk_args(p_av_paper, default_fee=0.005)
     p_av_paper.add_argument("--max-ticks", type=int, default=None)
     p_av_paper.add_argument("--run-id", default=None)
     p_av_paper.add_argument("--data-root", type=Path, default=None)
@@ -274,11 +301,7 @@ def main() -> None:
         default=None,
         help="aapl_mlp_v1 artifact dir (manifest.json + weights.npz)",
     )
-    p_dash.add_argument("--slip-bps", type=float, default=2.0)
-    p_dash.add_argument("--fee-per-share", type=float, default=0.005)
-    p_dash.add_argument("--initial-cash", type=float, default=1_000_000.0)
-    p_dash.add_argument("--max-loss-usd", type=float, default=None)
-    p_dash.add_argument("--max-position-shares", type=int, default=None)
+    _add_paper_risk_args(p_dash, default_fee=0.005)
     p_dash.add_argument("--max-ticks", type=int, default=None)
     p_dash.add_argument("--host", default="127.0.0.1")
     p_dash.add_argument("--port", type=int, default=8765)
@@ -599,16 +622,30 @@ def main() -> None:
     if args.cmd in {"paper-alphavantage", "paper-dashboard", "paper-binance"}:
         import asyncio
 
+        from crucibo.live.risk import validate_live_safety
         from crucibo.paper.engine import PaperConfig
         from crucibo.paper.session import (
-            run_paper_alphavantage_session,
-            run_paper_binance_session,
+            build_execution_backend,
+            run_paper_session_tracked,
             write_paper_manifest,
         )
+        from crucibo.paper.alphavantage_poll import stream_new_alphavantage_bars
+        from crucibo.paper.binance_ws import stream_closed_klines
 
         feed = "binance" if args.cmd == "paper-binance" else getattr(args, "feed", "alphavantage")
         interval = _paper_interval(feed, getattr(args, "interval", None))
         runs_parent = _runs_parent(args.data_root)
+        mode = getattr(args, "mode", "paper")
+        try:
+            validate_live_safety(
+                max_loss_usd=args.max_loss_usd,
+                max_notional_usd=getattr(args, "max_notional_usd", None),
+                allow_no_kill=getattr(args, "allow_no_kill", False),
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            raise SystemExit(2) from exc
+
         try:
             strat = resolve_strategy(
                 args.strategy,
@@ -625,29 +662,59 @@ def main() -> None:
             fee_per_share=args.fee_per_share,
             max_loss_usd=args.max_loss_usd,
             max_position_shares=args.max_position_shares,
+            max_notional_usd=getattr(args, "max_notional_usd", None),
+            flatten_on_kill=getattr(args, "flatten_on_kill", False),
         )
         sym = args.symbol.upper()
-        run_id = args.run_id or make_run_id(prefix="paper", symbol=sym, strategy=args.strategy)
-        out_dir = runs_parent / run_id
-        tick_count = 0
+        prefix = "live" if mode == "live_dry_run" else "paper"
+        run_id = args.run_id or make_run_id(prefix=prefix, symbol=sym, strategy=args.strategy)
         poll_seconds = getattr(args, "poll_seconds", 300.0)
+        backend, broker, latency = build_execution_backend(cfg=cfg, mode=mode)
+        model_path_str = str(args.model.resolve()) if args.model else None
+        interrupted = False
+        state = None
+        tick_count = 0
+        # Snapshot for interrupt-safe partial flush
+        _partial: dict = {"state": None, "ticks": 0}
 
-        def _on_tick(_tick, state) -> None:
+        def _on_tick(_tick, paper_state) -> None:
             nonlocal tick_count
             tick_count += 1
-            eq = state.cash + state.shares * _tick.price
+            _partial["state"] = paper_state
+            _partial["ticks"] = tick_count
+            eq = paper_state.cash + paper_state.shares * _tick.price
             print(
                 json.dumps(
                     {
                         "feed": feed,
+                        "mode": mode,
                         "ts_event_ns": _tick.ts_event_ns,
                         "price": _tick.price,
-                        "shares": state.shares,
-                        "cash": round(state.cash, 2),
+                        "shares": paper_state.shares,
+                        "cash": round(paper_state.cash, 2),
                         "equity": round(eq, 2),
-                        "killed": state.killed,
+                        "killed": paper_state.killed,
                     }
                 )
+            )
+
+        def _flush_bundle(final_state, n_ticks: int, was_interrupted: bool) -> Path:
+            return write_paper_manifest(
+                run_id=run_id,
+                runs_parent=runs_parent,
+                feed=feed,
+                symbol=sym,
+                interval=interval,
+                strategy_name=args.strategy,
+                model_path=model_path_str,
+                cfg=cfg,
+                state=final_state,
+                tick_count=n_ticks,
+                poll_seconds=poll_seconds if feed == "alphavantage" else None,
+                mode=mode,
+                interrupted=was_interrupted,
+                order_log=broker.order_log if broker is not None else None,
+                extra_manifest={"latency_tracker": latency.summary()},
             )
 
         if args.cmd == "paper-dashboard":
@@ -676,17 +743,23 @@ def main() -> None:
                         max_ticks=args.max_ticks,
                         runs_parent=runs_parent,
                         run_id=run_id,
+                        mode=mode,
+                        backend=backend,
+                        broker=broker,
+                        latency=latency,
                     )
                 )
             except KeyboardInterrupt:
-                print("interrupted — paper session stopped", file=sys.stderr)
+                interrupted = True
+                print("interrupted — flushing paper run bundle", file=sys.stderr)
                 raise SystemExit(130) from None
             except Exception as exc:
                 print(exc, file=sys.stderr)
                 raise SystemExit(2) from exc
 
-            print("paper run:", out_dir)
-            print("manifest:", out_dir / "paper_manifest.json")
+            run_dir = runs_parent / "runs" / run_id
+            print("paper run:", run_dir)
+            print("manifest:", run_dir / "run_manifest.json")
             if state.killed:
                 print("killed:", state.kill_reason, file=sys.stderr)
             return
@@ -696,47 +769,42 @@ def main() -> None:
                 "note: Alpha Vantage free tier is ~15-min delayed; budget 25 API calls/day",
                 file=sys.stderr,
             )
-            session_coro = run_paper_alphavantage_session(
-                strategy=strat,
+            tick_stream = stream_new_alphavantage_bars(
                 symbol=sym,
                 interval=interval,
-                cfg=cfg,
                 poll_seconds=poll_seconds,
-                max_ticks=args.max_ticks,
-                on_tick=_on_tick,
             )
         else:
-            session_coro = run_paper_binance_session(
-                strategy=strat,
-                symbol=sym,
-                interval=interval,
-                cfg=cfg,
-                max_ticks=args.max_ticks,
-                on_tick=_on_tick,
-            )
+            tick_stream = stream_closed_klines(symbol=sym, interval=interval)
 
         try:
-            state = asyncio.run(session_coro)
+            result = asyncio.run(
+                run_paper_session_tracked(
+                    strategy=strat,
+                    cfg=cfg,
+                    tick_stream=tick_stream,
+                    max_ticks=args.max_ticks,
+                    on_tick=_on_tick,
+                    backend=backend,
+                    mode=mode,
+                )
+            )
+            state = result.state
+            tick_count = result.tick_count
         except KeyboardInterrupt:
-            print("interrupted — paper session stopped", file=sys.stderr)
+            interrupted = True
+            print("interrupted — flushing paper run bundle", file=sys.stderr)
+            if _partial["state"] is not None:
+                mp = _flush_bundle(_partial["state"], int(_partial["ticks"]), True)
+                print("paper run:", mp.parent)
+                print("manifest:", mp)
             raise SystemExit(130) from None
         except Exception as exc:
             print(exc, file=sys.stderr)
             raise SystemExit(2) from exc
 
-        manifest_path = write_paper_manifest(
-            out_dir=out_dir,
-            feed=feed,
-            symbol=sym,
-            interval=interval,
-            strategy_name=args.strategy,
-            model_path=str(args.model.resolve()) if args.model else None,
-            cfg=cfg,
-            state=state,
-            tick_count=tick_count,
-            poll_seconds=poll_seconds if feed == "alphavantage" else None,
-        )
-        print("paper run:", out_dir)
+        manifest_path = _flush_bundle(state, tick_count, interrupted)
+        print("paper run:", manifest_path.parent)
         print("manifest:", manifest_path)
         if state.killed:
             print("killed:", state.kill_reason, file=sys.stderr)
