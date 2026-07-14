@@ -2,9 +2,34 @@
 
 [![CI](https://github.com/sweet-little-adder/crucibo/actions/workflows/ci.yml/badge.svg)](https://github.com/sweet-little-adder/crucibo/actions/workflows/ci.yml)
 
-**Deterministic event-stream replay and simulation** for time-ordered market data.
+**Portfolio-grade quant backtesting** for US equities — ingest OHLCV bars, run event-driven simulations with realistic fees/slippage, and produce auditable run reports.
 
-Ingest real market bars from **Alpha Vantage** (free tier) → replay on an explicit event-time clock → score strategies with auditable run manifests.
+Ingest from **Alpha Vantage** (free tier) → backtest with vectorized signals + event-driven execution → summarize with Sharpe/Sortino/Calmar and equity charts.
+
+### Quick start (v2 CLI)
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+cp .env.example .env && set -a && source .env && set +a   # ALPHA_VANTAGE_API_KEY
+
+# 1. Ingest US equity bars
+crucibo ingest --symbol AAPL --interval daily
+
+# 2. Backtest a strategy (MA crossover)
+crucibo backtest --strategy ma_crossover --symbol AAPL --interval daily \
+  --fast 12 --slow 26 --start 2026-02-11 --end 2026-06-01
+
+# 3. Full metrics + equity chart
+crucibo report --run-id latest --output examples/results
+```
+
+| v2 command | Purpose |
+|------------|---------|
+| `crucibo ingest` | Pull OHLCV into `data/silver/` Parquet + catalog |
+| `crucibo backtest` | Event-driven sim with bps fees, slippage, latency |
+| `crucibo report` | Sharpe, Sortino, Calmar, win rate, profit factor, PNG chart |
+
+Legacy commands (`replay-parquet`, `alphavantage-daily`, paper trading, etc.) still work unchanged.
 
 ---
 

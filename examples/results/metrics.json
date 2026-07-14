@@ -1,0 +1,18 @@
+{
+  "equity_start": 1000000.0,
+  "equity_end": 1002500.0,
+  "pnl_cash": 2500.0,
+  "return_pct": 0.25,
+  "max_drawdown": 0.0,
+  "max_drawdown_pct": 0.0,
+  "fills_count": 1,
+  "sharpe": 37.09806599734504,
+  "sortino": null,
+  "calmar": null,
+  "trades_count": 0,
+  "win_rate_pct": null,
+  "profit_factor": null,
+  "expectancy": null,
+  "avg_win": null,
+  "avg_loss": null
+}

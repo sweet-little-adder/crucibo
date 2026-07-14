@@ -1,16 +1,16 @@
-"""TickStrategy backed by a morning-star artifact bundle."""
+"""TickStrategy backed by an aapl_mlp_v1 artifact bundle."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from crucibo.aapl_mlp_v1.loader import AaplMlpV1Model, load_aapl_mlp_v1_model
 from crucibo.features import FeatureState
 from crucibo.models import TradeTick
-from crucibo.morning_star.loader import MorningStarModel, load_morning_star_model
 
 
-class MorningStarStrategy:
-    def __init__(self, model: MorningStarModel) -> None:
+class AaplMlpV1Strategy:
+    def __init__(self, model: AaplMlpV1Model) -> None:
         self._model = model
         self._state = FeatureState(
             lookback=model.lookback,
@@ -19,8 +19,8 @@ class MorningStarStrategy:
         )
 
     @classmethod
-    def from_artifact(cls, path: Path) -> MorningStarStrategy:
-        return cls(load_morning_star_model(path))
+    def from_artifact(cls, path: Path) -> AaplMlpV1Strategy:
+        return cls(load_aapl_mlp_v1_model(path))
 
     def desired_shares(
         self,
