@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/sweet-little-adder/crucibo/actions/workflows/ci.yml/badge.svg)](https://github.com/sweet-little-adder/crucibo/actions/workflows/ci.yml)
 
-**Deterministic event-stream replay and simulation** for time-ordered market data.
+**Trading infrastructure** — deterministic event-time replay today; paper and live execution on the same path tomorrow.
 
-Ingest real market bars from **Alpha Vantage** (free tier) → replay on an explicit event-time clock → score strategies with auditable run manifests.
+Ingest real market bars from **Alpha Vantage** (free tier) → replay on an explicit event-time clock → score strategies with auditable run manifests → grow into live loops with kill switches and measured latency.
 
 ---
 
@@ -113,10 +113,19 @@ Outputs land under `./data/runs/<run_id>/` (override with `CRUCIBO_DATA_ROOT`).
 
 ---
 
-## What this is / is not
+## North star
 
-- **Is:** Reproducible real-data slices, deterministic replay, walk-forward research scaffolding.
-- **Is not:** HFT infra, live trading, or claims about market edge.
+**Crucibo is trading infrastructure in the making** — not a forever research toy that defines itself by what it refuses to be.
+
+| Horizon | Target |
+|---------|--------|
+| **Now** | Honest event-time replay, real market data, auditable manifests, research that doesn't cheat the clock. |
+| **Next** | Paper loops on live feeds, kill switches, capital limits, run recording — the same path live will use. |
+| **Aim** | **Live trading** and **HFT-shaped infra**: deterministic clocks, hot-path discipline, execution + risk as first-class systems, latency treated as a measured property (profile → fix), not a marketing claim. |
+
+No claims of edge. Edge is earned in production; infra earns the right to carry it.
+
+Details: [docs/VISION.md](docs/VISION.md) · [docs/ROADMAP.md](docs/ROADMAP.md)
 
 ---
 

@@ -4,7 +4,7 @@ This file exists so **you do not rely on AI memory**.
 
 ## Where you are — 2026-06 snapshot
 
-You are building **truthful ingest → replay → simulation** for US equities at home (`crucibo`)—a small, auditable research stack, not institutional-scale trading infrastructure.
+You are building **truthful ingest → replay → paper → live** for systematic trading (`crucibo`)—auditable trading infrastructure that starts small and grows toward HFT-shaped systems and real capital with kill switches.
 
 | Area | Status |
 |------|--------|

@@ -18,9 +18,9 @@ The **canonical project plan** is the docs tree:
 
 ## What crucibo is
 
-**Tagline:** US-equities research sandbox — real market data ingest, event-time replay, auditable run manifests.
+**Tagline:** Trading infrastructure — real market data, event-time replay, paper → live path, auditable manifests.
 
-**Core thesis** ([docs/VISION.md](VISION.md)): professional systematic habits (time, leakage, fills, fees, auditability) on a limited-scope pipeline.
+**Core thesis** ([docs/VISION.md](VISION.md)): HFT-shaped discipline (time, leakage, fills, fees, risk, latency as engineering) bootstrapped from a limited-scope pipeline, aimed at **live trading**.
 
 **Pipeline:**
 
