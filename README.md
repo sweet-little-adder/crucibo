@@ -1,5 +1,7 @@
 # morning-star
 
+> GitHub repository: `crucibo` (renamed from `morning-star` on 2026-11-26). The Python package and CLI are still named `morning-star`. The replay engine is now the GitHub repository `morning-star`, whose package and CLI are still named `crucibo`.
+
 Train causal models and export versioned artifacts for **crucibo** replay and paper trading.
 
 | Repo | Role |
