@@ -139,6 +139,9 @@ def load_manifest(path: Path) -> ArtifactManifest:
 
 def load_baseline_mlp(artifact_dir: Path) -> BaselineMLP:
     resolved = resolve_artifact_dir(artifact_dir)
+    raw_type = json.loads(manifest_path(resolved).read_text(encoding="utf-8")).get("model_type")
+    if raw_type != MODEL_TYPE_MLP_V1:
+        raise ValueError(f"unsupported model_type {raw_type!r}")
     manifest = load_manifest(manifest_path(resolved))
     if manifest.contract_version != CONTRACT_VERSION:
         raise ValueError(
