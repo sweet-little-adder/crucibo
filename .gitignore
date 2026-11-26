@@ -8,3 +8,5 @@ dist/
 build/
 artifacts/
 .DS_Store
+data/
+results_compare*.json
