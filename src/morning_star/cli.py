@@ -86,7 +86,22 @@ def main() -> None:
     p_wf.add_argument("--fee-per-share", type=float, default=0.005)
     _add_train_flags(p_wf)
 
+    p_cmp = subs.add_parser(
+        "compare",
+        help="Predeclared walk-forward comparison (needs the [compare] extra and daily bars)",
+    )
+    p_cmp.add_argument("--config", type=Path, default=Path("configs/compare_v2.json"))
+    p_cmp.add_argument("--data-dir", type=Path, default=Path("data"))
+    p_cmp.add_argument("--out", type=Path, default=Path("results_compare.json"))
+
     args = parser.parse_args()
+    if args.cmd == "compare":
+        from morning_star.compare.run import main as compare_main
+
+        compare_main(
+            ["--config", str(args.config), "--data-dir", str(args.data_dir), "--out", str(args.out)]
+        )
+        return
     config = load_config(getattr(args, "config", None))
     train_kwargs = _train_kwargs_from_args(args, config)
     backend = getattr(args, "backend", "numpy")
